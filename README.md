@@ -12,4 +12,7 @@ The study integrates epidemiologic surveillance, travel history data, parasite g
   - `manuscript figures/` contains figures included in the main manuscript.
   - `supplementary_materials/` contains supplementary figures, tables, and additional materials not included in the main manuscript.
 - `Results/` contains intermediate outputs and summary results
+## Data availability
+Data and code required to reproduce the analyses presented in the manuscript are provided in this repository. Sensitive or potentially identifiable information has been removed prior to sharing.
+## References
 
