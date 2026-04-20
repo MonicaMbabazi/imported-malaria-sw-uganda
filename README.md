@@ -1,5 +1,7 @@
 # Imported malaria in southwestern Uganda
 doi: 10.64898/2026.01.25.26344810
+
+This repository contains data, analysis scripts, figures, and supplementary materials for the project:
 #### “Imported malaria predominates in near-elimination settings in Southwestern Uganda.”
 ## Project overview:
 Malaria transmission in southwestern Uganda is relatively low compared to most regions of the country, yet persistent transmission continues to occur. This project investigates the contribution of imported malaria infections to transmission dynamics in three health facility catchment areas in southwestern Uganda: Maziba, Muko, and Kamwezi.
