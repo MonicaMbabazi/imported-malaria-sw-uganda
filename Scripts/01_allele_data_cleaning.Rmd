@@ -1,0 +1,421 @@
+---
+title: "PRELIMINARY ANALYSIS"
+date: "2025-04-21"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+# load the required packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+library(tidyr) 
+library(tibble)
+library(readxl)
+library(kableExtra)
+library(ggbeeswarm)
+library(RColorBrewer)
+library(readstata13)
+## Set a working directory
+setwd("/Manuscript_Analysis_03_2025")
+```
+
+### Post Moire Analysis
+
+#### Organise and merge data from the 3 phases. Do QC on them before running MOIRE and Dcifer (Muko and Maziba)
+#### Here, I will consider MOI, Effective MOI, Heterozygosity, and Within-host relatedness
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## Reading in these csv files for each site
+### How many samples per Round: Maziba and Muko
+ 
+### Round 1
+Muko_R1<- read.csv("Data/raw/Muko_R1.csv")
+Maziba_R1<- read.csv("Data/raw/Maziba_R1.csv")
+
+## Samples
+length(unique(Muko_R1$SampleID)) # 86 samples
+length(unique(Maziba_R1$SampleID)) # 25 samples
+
+### Round 2
+Muko_R2<- read.csv("Data/raw/Muko_R2.csv")
+Maziba_R2<- read.csv("Data/raw/Maziba_R2.csv")
+
+## Samples
+length(unique(Muko_R2$SampleID)) # 34 samples
+length(unique(Maziba_R2$SampleID)) # 27  samples
+
+### Round 3
+Muko_R3<- read.csv("Data/raw/Muko_R3.csv")
+Maziba_R3<- read.csv("Data/raw/Maziba_R3.csv")
+
+## Samples
+length(unique(Muko_R3$SampleID)) # 52 samples
+length(unique(Maziba_R3$SampleID)) # 43  samples
+
+########### Bind together
+
+
+Maziba_all <- bind_rows(Maziba_R1, Maziba_R2, Maziba_R3)
+
+length(unique(Muko_all$SampleID)) # 172
+length(unique(Maziba_all$SampleID))# 95
+
+#add data across samples, drop "allele" because it is different across seq runs
+# Muko
+
+Muko_data <- Muko_all %>% 
+  group_by(SampleID, Locus, ASV, PseudoCIGAR) %>% 
+  summarise(Reads = sum(Reads), .groups = "drop") %>% 
+  ungroup()
+
+# Maziba
+Maziba_data <- Maziba_all %>% 
+ group_by(SampleID, Locus, ASV, PseudoCIGAR) %>% 
+  summarise(Reads = sum(Reads), .groups = "drop") %>% 
+  ungroup()
+
+# Check for this sample "IM-23-120-BIIV"
+print(ifelse("IM-23-120-BIIV" %in% Muko_data$SampleID, "Sample is present.", "Sample is NOT present."))
+```
+
+#### QC the per site merged data 
+
+##### Muko Samples
+```{r,}
+## Muko
+### Select only data from Pool A
+Muko_data <- Muko_data %>%
+  filter(endsWith(Locus, "A"))
+length(unique(Muko_data$SampleID))
+
+### Filter out loci that with 10 reads and below
+Muko_data <- Muko_data %>% 
+  filter(Reads > 10)
+## Exclude these three loci, highly associated with false positive
+excluded_loci <- c("Pf3D7_05_v3-550803-551072-1A", "Pf3D7_07_v3-1028330-1028603-1A", "Pf3D7_11_v3-1374917-1375148-1A") 
+filtered_data<- Muko_data %>%
+  filter(!Locus %in% excluded_loci) 
+
+length(unique(filtered_data$SampleID)) ## 172 samples
+
+## Filter out samples based % of loci with 100 read.
+
+# Group by SampleID and count the number of loci with reads >= 100 for each sample
+sample_counts <- filtered_data%>%
+  group_by(SampleID) %>%
+  summarise(perc_loci_above_100 = sum(Reads >= 100) / n()) %>%
+  ungroup()
+
+## We shall consider 50% of loci having at least 100 reads
+# Retaining samples: 50% loci having reads >= 100
+filtered_samples_50 <- sample_counts %>%
+  filter(perc_loci_above_100 >= 0.50) ## This retains 164 samples
+#length(unique(filtered_samples_50$SampleID))
+
+# Extract sample IDs that do not meet the criteria
+rejected_sample_ids <- sample_counts %>%
+  filter(perc_loci_above_100 < 0.5) %>%  
+  select(SampleID)
+
+### Filter to remove those that did not pass the criteria of 50% loci having 100 reads
+filtered_data<- filtered_data %>%
+  filter(!SampleID %in% rejected_sample_ids$SampleID) 
+length(unique(filtered_data$SampleID))
+
+#Remember pseudocigars "mask" certain parts of the ASV that are unreliable 
+
+filtered_muko <- filtered_data %>% 
+ # select(-ASV) %>% 
+  group_by(SampleID, Locus, PseudoCIGAR) %>% #drops out allele/ASV, which is OK 
+  dplyr::summarize(Reads = sum(Reads)) %>% #this combines reads in the Locus that have matching Pseudocigars 
+  ungroup () %>% 
+   group_by(SampleID, Locus) %>% #now calculate the norm.reads.allele by PseudoCIGAR 
+    mutate(norm.reads.allele = Reads/sum(Reads)) %>% 
+    filter(norm.reads.allele > 0.01) %>% #filter out 
+  mutate(
+    sum_reads = sum(Reads), 
+    norm.reads.allele = Reads/ sum_reads)
+
+length(unique(filtered_muko$SampleID)) # 164 samples
+
+## Cross-checking the calculated allele frequencies
+check_freq <- filtered_muko %>%
+  group_by(SampleID, Locus) %>%
+  summarise(freq_sum = sum(norm.reads.allele), .groups = "drop") %>%
+  mutate(is_ok = abs(freq_sum - 1) < 0.001) # Allowing a small rounding error
+##-----------------------------------------------------------
+
+# Rename some columns to have moire format
+filtered_allele_data <- dplyr::rename(filtered_muko, sample_id = SampleID)
+filtered_allele_data <- filtered_muko  %>% dplyr::rename(sample_id = SampleID)
+filtered_allele_data <- filtered_allele_data  %>% dplyr::rename(locus = Locus)
+filtered_allele_data <- filtered_allele_data  %>% dplyr::rename(allele = PseudoCIGAR)
+
+## Filter out sample "IM-23-120-BIIV" since its low qc values
+print(ifelse("IM-23-120-BIIV" %in% filtered_allele_data$sample_id, "Sample is present.", "Sample is NOT present."))
+
+# "Sample is NOT present." The sample was excluded by the filtering strategies above. But we can explicitly exclude it again
+filtered_allele_data <- filtered_allele_data[filtered_allele_data$sample_id != "IM-23-120-BIIV", ]
+length(unique(filtered_allele_data$sample_id))
+
+### Let's remove "Duplicated samples"
+Duplic_samples<- read.csv("Data/raw/duplicated_samples_to_remove_from_analysis.csv") %>% dplyr::rename(sample_id=SampleID)
+##
+filtered_allele_data_mu <- filtered_allele_data %>%
+  anti_join(Duplic_samples, by = "sample_id")
+length(unique(filtered_allele_data_mu$sample_id))
+
+##----------
+write.csv(filtered_allele_data_mu, "Data/processed/Muko_filtered_data.csv", row.names = FALSE)
+```
+
+#### QC on Maziba samples
+
+```{r,}
+### Retain only data from Pool A
+Maziba_data <- Maziba_data %>%
+  filter(endsWith(Locus, "A")) ##  
+length(unique(Maziba_data$SampleID))
+
+### Filter out loci that with 10 reads and below
+Maziba_data <- Maziba_data %>% 
+  filter(Reads > 10)
+## Exclude these three loci, highly associated with false positive
+excluded_loci <- c("Pf3D7_05_v3-550803-551072-1A", "Pf3D7_07_v3-1028330-1028603-1A", "Pf3D7_11_v3-1374917-1375148-1A") 
+filtered_data<- Maziba_data %>%
+  filter(!Locus %in% excluded_loci) 
+
+length(unique(filtered_data$SampleID)) ## 95 samples
+
+## Filter out samples based % of loci with 100 read.
+
+# Group by SampleID and count the number of loci with reads >= 100 for each sample
+sample_counts <- filtered_data%>%
+  group_by(SampleID) %>%
+  summarise(perc_loci_above_100 = sum(Reads >= 100) / n()) %>%
+  ungroup()
+
+## We shall consider 50% of loci having at least 100 reads
+# Retaining samples: 50% loci having reads >= 100
+filtered_samples_50 <- sample_counts %>%
+  filter(perc_loci_above_100 >= 0.50) ## This retains 94 samples
+length(unique(filtered_samples_50$SampleID))
+
+# Extract sample IDs that do not meet the criteria
+rejected_sample_ids <- sample_counts %>%
+  filter(perc_loci_above_100 < 0.5) %>%  
+  select(SampleID)
+
+### Filter to remove those that did not pass the criteria of 50% loci having 100 reads
+filtered_data<- filtered_data %>%
+  filter(!SampleID %in% rejected_sample_ids$SampleID) 
+length(unique(filtered_data$SampleID))
+
+### Filter by allele frequency: loci with allele frequencies below 1% to be excluded.
+## Using pseudoCIGAR as the true allele since it masks certain parts of ASVs that are unreliable
+filtered_maziba <- filtered_data %>% 
+ group_by(SampleID, Locus, PseudoCIGAR) %>% #drops out allele/ASV, which is OK 
+  dplyr::summarize(Reads = sum(Reads)) %>% #this combines reads in the Locus that have matching Pseudocigars 
+  ungroup () %>% 
+   group_by(SampleID, Locus) %>% #now calculate the norm.reads.allele by PseudoCIGAR 
+    mutate(norm.reads.allele = Reads/sum(Reads)) %>% 
+    filter(norm.reads.allele > 0.01) %>% #filter out 
+  mutate(
+    sum_reads = sum(Reads), 
+    norm.reads.allele = Reads/ sum_reads)
+#
+length(unique(filtered_maziba$SampleID)) # 94 samples
+#
+## Cross-checking the calculated allele frequencies
+check_freq <- filtered_maziba %>%
+  group_by(SampleID, Locus) %>%
+  summarise(freq_sum = sum(norm.reads.allele), .groups = "drop") %>%
+  mutate(is_ok = abs(freq_sum - 1) < 0.001) # Allowing a small rounding error
+
+# Rename some columns to have moire format
+filtered_allele_data <- filtered_maziba  %>% dplyr::rename(sample_id = SampleID)
+filtered_allele_data <- filtered_allele_data  %>% dplyr::rename(locus = Locus)
+filtered_allele_data <- filtered_allele_data  %>% dplyr::rename(allele = PseudoCIGAR)
+
+#
+print(ifelse("IM-23-120-BIIV" %in% filtered_allele_data$sample_id, "Sample is present.", "Sample is NOT present."))
+
+# Remove duplicated samples
+filtered_allele_data_ma <- filtered_allele_data %>%
+  anti_join(Duplic_samples, by = "sample_id")
+length(unique(filtered_allele_data_ma$sample_id))
+## 
+write.csv(filtered_allele_data_ma, "Data/processed/Maziba_filtered_data.csv", row.names = FALSE)
+```
+
+### Kamwezi
+```{r,}
+## Kamwezi data
+Kamwezi<- read.csv("Data/raw/Kamwezi_allele_data.csv")
+##
+Kamwezi <- Kamwezi %>% 
+  group_by(SampleID, Locus, ASV, PseudoCIGAR) %>% 
+  summarise(Reads = sum(Reads), .groups = "drop") %>% 
+  ungroup()
+
+## QC
+### Select only data from Pool A
+Kamwezi_data <- Kamwezi %>%
+  filter(endsWith(Locus, "A"))
+length(unique(Kamwezi_data$SampleID))
+
+### Filter out loci that with 10 reads and below
+Kamwezi_data <- Kamwezi_data %>% 
+  filter(Reads > 10)
+## Exclude these three loci, highly associated with false positive
+excluded_loci <- c("Pf3D7_05_v3-550803-551072-1A", "Pf3D7_07_v3-1028330-1028603-1A", "Pf3D7_11_v3-1374917-1375148-1A") 
+filtered_data<- Kamwezi_data %>%
+  filter(!Locus %in% excluded_loci) 
+
+length(unique(filtered_data$SampleID)) ## 100 samples
+
+## Filter out samples based % of loci with 100 read.
+
+# Group by SampleID and count the number of loci with reads >= 100 for each sample
+sample_counts <- filtered_data%>%
+  group_by(SampleID) %>%
+  summarise(perc_loci_above_100 = sum(Reads >= 100) / n()) %>%
+  ungroup()
+
+## We shall consider 50% of loci having at least 100 reads
+# Retaining samples: 50% loci having reads >= 100
+filtered_samples_50 <- sample_counts %>%
+  filter(perc_loci_above_100 >= 0.50) ## This retains 164 samples
+#length(unique(filtered_samples_50$SampleID))
+
+# Extract sample IDs that do not meet the criteria
+rejected_sample_ids <- sample_counts %>%
+  filter(perc_loci_above_100 < 0.5) %>%  
+  select(SampleID)
+
+### Filter to remove those that did not pass the criteria of 50% loci having 100 reads
+filtered_data<- filtered_data %>%
+  filter(!SampleID %in% rejected_sample_ids$SampleID) 
+length(unique(filtered_data$SampleID))
+
+#Remember pseudocigars "mask" certain parts of the ASV that are unreliable 
+
+filtered_kamwezi <- filtered_data %>% 
+ group_by(SampleID, Locus, PseudoCIGAR) %>% #drops out allele/ASV, which is OK 
+  dplyr::summarize(Reads = sum(Reads)) %>% #this combines reads in the Locus that have matching Pseudocigars 
+  ungroup () %>% 
+   group_by(SampleID, Locus) %>% #now calculate the norm.reads.allele by PseudoCIGAR 
+    mutate(norm.reads.allele = Reads/sum(Reads)) %>% 
+    filter(norm.reads.allele > 0.01) %>% #filter out 
+  mutate(
+    sum_reads = sum(Reads), 
+    norm.reads.allele = Reads/ sum_reads)
+#
+length(unique(filtered_kamwezi$SampleID)) # 100 samples
+
+# Rename some columns to have moire format
+filtered_allele_data <- filtered_kamwezi  %>% dplyr::rename(sample_id = SampleID)
+filtered_allele_data <- filtered_allele_data  %>% dplyr::rename(locus = Locus)
+filtered_allele_data <- filtered_allele_data  %>% dplyr::rename(allele = PseudoCIGAR)
+
+length(unique(filtered_allele_data$sample_id))
+### Let's remove "Duplicated samples"
+Duplic_samples<- read.csv("Data/raw/duplicated_samples_to_remove_from_analysis.csv") %>% dplyr::rename(sample_id=SampleID)
+##
+filtered_allele_data_ka <- filtered_allele_data %>%
+  anti_join(Duplic_samples, by = "sample_id")
+length(unique(filtered_allele_data$sample_id))
+
+##----------
+write.csv(filtered_allele_data_ka, "Data/processed/Kamwezi_filtered_data.csv", row.names = FALSE)
+```
+
+### Retaining data that was collected up to June, 2024 for Muko and Maziba
+
+```{r,}
+Muko_IDs <- filtered_allele_data_mu[, "sample_id", drop = FALSE] %>% unique()
+Maziba_IDs <- filtered_allele_data_ma[, "sample_id", drop = FALSE] %>% unique()
+#
+LTS <- bind_rows(Muko_IDs, Maziba_IDs)
+length(unique(LTS$sample_id))
+## Let's extract dates from the survey and umsp database
+Survey <- read.csv("Data/raw/Muko_Maziba_travel_survey_data.csv") %>% dplyr::rename(sample_id=barcode) %>% select(sample_id, date)
+
+#
+LTS_dates <- LTS %>%
+  left_join(Survey, by = "sample_id")
+
+sum(is.na(LTS_dates$date))
+
+## Umsp database
+UMSP_database <- read.dta13("Data/raw/2025_01_26_UMSP_low_trans_sites_and_Kamwezi_all_data.dta",
+           convert.factors = TRUE, generate.factors = TRUE,
+           encoding = "UTF-8", fromEncoding = NULL, 
+           convert.underscore = FALSE, missing.type = TRUE,
+           convert.dates = TRUE, replace.strl = TRUE,
+           add.rownames = FALSE, nonint.factors = TRUE,
+           select.rows = NULL, select.cols = NULL, strlexport =
+             FALSE, strlpath = ".") %>%
+  dplyr::rename(sample_id=barcode) 
+
+## UMSP data
+UMSP <- UMSP_database %>%
+  filter(site %in% c("Muko", "Maziba") & format(date, "%Y") == "2023") %>% select(sample_id, date) %>% droplevels()
+
+#
+LTS_dates <- LTS_dates %>%
+  left_join(UMSP %>% select(sample_id, date), by = "sample_id", suffix = c("", "_umsp"))%>%
+  mutate(date = coalesce(as.Date(date), as.Date(date_umsp))
+  ) %>%  select(-date_umsp)
+
+sum(is.na(LTS_dates$date)) # 57 missing dates
+
+# Let's arrange date column
+LTS_ordered <- LTS_dates %>%
+  arrange(date)
+
+#
+LTS_filtered <- LTS_ordered %>%
+  filter(as.Date(date) <= as.Date("2024-06-30"))
+#-------------------------------------------------------------------------------------
+### Save the filtered data per site
+# Muko
+filtered_allele_data_mu <- filtered_allele_data_mu %>%
+  semi_join(LTS_filtered, by = "sample_id")
+
+length(unique(filtered_allele_data_mu$sample_id))
+#
+write.csv(filtered_allele_data_mu, "Data/processed/Muko_filtered_data1.csv", row.names = FALSE)
+##________________________________________________________________________________________________
+
+## Maziba
+filtered_allele_data_ma <- filtered_allele_data_ma %>%
+  semi_join(LTS_filtered, by = "sample_id")
+
+length(unique(filtered_allele_data_ma$sample_id))
+#
+write.csv(filtered_allele_data_ma, "Data/processed/Maziba_filtered_data1.csv", row.names = FALSE)
+```
+
+### Lets drop duplicated samples from the Survey data
+```{r,}
+
+Survey <- read.csv("Data/raw/Muko_Maziba_travel_survey_data.csv") %>% dplyr::rename(sample_id=barcode)
+
+faked_samples<- read.csv("Data/raw/samples_to_keep_in_geno_analysis_but_throw_out_travel_data (1).csv") %>% dplyr::rename(sample_id=SampleID)
+
+## Filter out this samples from the survey
+Survey_filtered <- Survey %>%
+  anti_join(faked_samples, by = "sample_id")
+## 
+Survey_filtered <- Survey_filtered %>%
+  filter(as.Date(date) <= as.Date("2024-06-30"))
+
+write.csv(Survey_filtered, "Data/processed/Survey_filtered_data.csv", row.names = FALSE)
+```
+
+
+
