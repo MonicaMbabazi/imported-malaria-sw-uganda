@@ -8,7 +8,7 @@ Malaria transmission in southwestern Uganda is relatively low compared to most r
 
 The study integrates epidemiologic surveillance, travel history data, parasite genotyping, and transmission network analyses to distinguish imported from locally acquired malaria infections. Parasite genetic data were generated using the MAD4HatTeR multiplex amplicon sequencing panel, while analyses of complexity of infection, genetic relatedness, and transmission networks were performed using MOIRE, Dcifer, and Plasmotrack.
 ## Repository structure:
-- `Data/` contains raw and processed datasets used in the analyses
+- `Data/` contains raw from MAD4HatTeR and processed datasets (after quality control) used in the analyses
 - `Scripts/` contains analysis scripts used for data cleaning, statistical analyses, genomic analyses, and figure generation
 - `Figures/` contains all figure files and tables used in the manuscript.
   - `manuscript figures/` contains figures included in the main manuscript.
