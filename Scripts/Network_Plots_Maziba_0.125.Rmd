@@ -1,0 +1,1108 @@
+---
+title: "Dcifer Analysis"
+author: "Monica Mbabazi"
+date: "2026-04-18th"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls(all=TRUE))
+## Loading required libraries
+library(dcifer)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(ggplot2)
+library(readr)
+library(plotly)
+library(ggnewscale)
+library(tidyverse)
+library(descriptr)
+library(ggraph)
+library(igraph)
+library(grid)
+library(kableExtra)
+library(cluster)  # For kmeans clustering
+library(mclust)  
+library(igraph)
+library(tidygraph)
+library(ggraph)
+library(cowplot)
+library(gridExtra)
+library(scales)
+setwd("/home/monica/Desktop/IMMRSE_Study/IMMRSE-Concept/Manuscript_Analysis_03_2025/")
+```
+
+#### Running Dcifer on Maziba Data
+```{r, echo=TRUE}
+## Moire outputs
+maziba_moire_results <- readr::read_rds("MOIRE_RESULTS/Maziba/Maziba_mcmc_results.rds")
+
+## Moire data
+maziba_data_moire <- read.csv("Filtered_data/Maziba_filtered_data.csv", header = T)
+#maziba_data_moire <- maziba_data_moire %>% rename("allele"="PseudoCIGAR")
+# Format the data
+maziba_data <- moire::load_long_form_data(maziba_data_moire)
+
+# Function to calculate median allele frequencies
+calculate_median_afs <- function(x) {
+  median_afs <- lapply(x$chains[[1]]$allele_freqs, function(af) {
+    mat <- matrix(unlist(af), ncol = length(af))
+    d <- dist(t(mat))
+    af[[which.min(rowSums(as.matrix(d)))]]
+  })
+  return(median_afs)
+}
+# Calculate median allele frequencies 
+maziba_median_afs <- calculate_median_afs(maziba_moire_results)
+# Define uninformative loci
+ma_uninformative_loci <- maziba_data$uninformative_loci
+
+# Filter to remove these loci
+filtered_maziba <- maziba_data_moire %>% filter(!locus %in% ma_uninformative_loci)
+
+# Prepare DCIFER input for each site
+maziba_dsmp<- dcifer::formatDat(filtered_maziba, "sample_id", "locus", "allele")
+### COI
+maziba_coi   <- moire::summarize_coi(maziba_moire_results)$post_coi_med
+
+### Median frequency
+maziba_dsmp <- dcifer::matchAfreq(maziba_dsmp, maziba_median_afs)
+
+## IBD per site
+dres_df <- ibdDat(maziba_dsmp, maziba_coi, maziba_median_afs, pval = TRUE, confint = TRUE, rnull = 0.125, alpha = 0.05, nr = 1e3)
+```
+
+### Highly related pairs
+```{r, }
+# Extract IBD estimates from rnull = 0.125 run
+ibd_est <- dres_df[, , "estimate"]
+ibd_lower <- dres_df[, , "CI_lower"]
+ibd_upper <- dres_df[, , "CI_upper"]
+
+
+#rnull = 0.125
+ibd_df <- as.data.frame(ibd_est)
+ibd_df <- tibble::rownames_to_column(ibd_df, var = "x")
+
+ibd_lower_df <- as.data.frame(ibd_lower)
+ibd_lower_df <- tibble::rownames_to_column(ibd_lower_df, var = "x")
+
+ibd_upper_df <- as.data.frame(ibd_upper)
+ibd_upper_df <- tibble::rownames_to_column(ibd_upper_df, var = "x")
+##---------------------------------------------------------------------------------------------
+### Better way
+ibd_df1 <- as.data.frame(as.table(dres_df[, , "estimate"])) %>%
+  rename(sample1 = Var1, sample2 = Var2, estimate = Freq)
+
+ibd_lower_df1 <- as.data.frame(as.table(dres_df[, , "CI_lower"])) %>%
+  rename(sample1 = Var1, sample2 = Var2, CI_lower = Freq)
+
+ibd_upper_df1 <- as.data.frame(as.table(dres_df[, , "CI_upper"])) %>%
+  rename(sample1 = Var1, sample2 = Var2, CI_upper = Freq)
+
+# Join into one dataframe
+ibd_df1 <- ibd_df1 %>%
+  left_join(ibd_lower_df1, by = c("sample1", "sample2")) %>%
+  left_join(ibd_upper_df1, by = c("sample1", "sample2"))
+##-------------------------------------------------------------------------------------
+
+#this is a DF with all ibd data in longform between non-matching pairs of samples
+ibd_df_long <- ibd_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd"
+  ) %>% filter(!is.na(ibd)) 
+
+hist(ibd_df_long$ibd)
+
+#### BIND IN CI VALUES TO EACH DF ###############
+
+CI_lower_df_long <- ibd_lower_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd_lower")
+
+CI_upper_df_long <- ibd_upper_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd_upper")
+
+#bind CIs into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(CI_lower_df_long) %>% 
+  left_join(CI_upper_df_long)
+
+#### BIND IN P VALUES TO EACH DF ###############
+pvals <- dres_df[, , "p_value"]
+pvals <- as.data.frame(pvals)
+pvals <- tibble::rownames_to_column(pvals, var = "x")
+
+#pval 0.05
+pvals_df_long <- pvals %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "p_value"
+  ) %>% filter(!is.na(p_value)) %>% 
+  mutate(p_value = p_value/2) #divide by 2 for 1 sided test
+
+#bind pvals into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(pvals_df_long)
+
+
+#make p-value very large if r <0.125
+
+ibd_df_long <- ibd_df_long %>% mutate(p_value = ifelse(ibd <0.125, 1, p_value))
+
+#here is where i do corrections for rnull = 0.25 dataframe
+long_ibd1 <- ibd_df_long %>% 
+  mutate(p_BH = p.adjust(p_value, method = "BH"), 
+         p_BF = p.adjust(p_value, method = "bonferroni")) %>% 
+  mutate(sig_0.01 = ifelse(p_value < 0.01, 1, 0), sig_0.01_BH = ifelse(p_BH < 0.01, 1, 0), 
+         sig_0.01_BF = ifelse(p_BF < 0.01, 1, 0)) %>% 
+  mutate(sig_0.05 = ifelse(p_value < 0.05, 1, 0), sig_0.05_BH = ifelse(p_BH < 0.05, 1, 0),
+         sig_0.05_BF= ifelse(p_BF < 0.05, 1, 0)) %>% 
+  mutate(n = 1)
+
+#highly related pairs? 
+highly_related_df <- long_ibd1 %>% filter(sig_0.05_BH == 1) ## 23 related pairs
+
+write.csv(highly_related_df, 
+          file = "Final_Manuscript_Figures/Re-analysis_Figs_2026/Maziba_highly_rel-pairs.csv", 
+          row.names = FALSE)
+#highly related pairs out of all pairwise comparisons # 0.00587334 (0.59%) 
+sum(long_ibd1$sig_0.05_BH)/sum(long_ibd1$n)
+
+### Mean/Median IBD
+mean_ibd <- mean(long_ibd1$ibd, na.rm = TRUE) ## 0.0146
+median_ibd <- median(long_ibd1$ibd, na.rm = TRUE)
+
+## Inbreeding/Within-host relatedness
+mean_ibd_related <- mean(highly_related_df$ibd, na.rm = TRUE) ## 0.9384
+
+## r ranges
+range(highly_related_df$ibd, na.rm = TRUE) # 0.462 - 1.000
+```
+
+### Network plots based on DCIFER
+```{r, }
+## Plot 1: Include also the singletons in the plot
+all_samples <- rownames(dmat_maziba)
+g <- graph_from_data_frame(highly_related_df, vertices = data.frame(name = all_samples), directed = FALSE)
+
+##
+clusters <- components(g)
+## Identify which samples are in a cluster with more than one node
+cluster_sizes <- table(clusters$membership)
+is_singleton_cluster <- cluster_sizes == 1
+
+## Re-assign singletons to a shared group (e.g., "Singleton")
+cluster_labels <- clusters$membership
+cluster_labels[is_singleton_cluster[cluster_labels]] <- "Singleton"
+
+tg <- as_tbl_graph(g) %>%
+  mutate(cluster = as.factor(cluster_labels))
+
+# Plot
+ggraph(tg, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = cluster), size = 2) +
+  labs(title = "Clusters of Highly Related Samples ",
+       color = "Cluster ID") +
+  theme_minimal()
+#-----------------------------------------------------------------------------------
+library(scales)
+
+## Build custom colors: gray for "Singleton", rainbow for others
+unique_clusters <- sort(unique(cluster_labels[cluster_labels != "Singleton"]))
+cluster_colors <- setNames(
+  c("gray", rainbow(length(unique_clusters))),
+  c("Singleton", unique_clusters)
+)
+#-----------------------------------------------------------------------------
+
+# Extract IBD estimates for each site
+dmat_maziba <- dres_df[, , "estimate"]
+
+
+## Plot 1: Include also the singletons in the plot
+all_samples <- rownames(dmat_maziba)
+g <- graph_from_data_frame(highly_related_df, vertices = data.frame(name = all_samples), directed = FALSE)
+
+##
+clusters <- components(g)
+## Identify which samples are in a cluster with more than one node
+cluster_sizes <- table(clusters$membership)
+is_singleton_cluster <- cluster_sizes == 1
+
+## Re-assign singletons to a shared group (e.g., "Singleton")
+cluster_labels <- clusters$membership
+cluster_labels[is_singleton_cluster[cluster_labels]] <- "Singleton"
+
+tg <- as_tbl_graph(g) %>%
+  mutate(cluster = as.factor(cluster_labels))
+
+# Plot
+ggraph(tg, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = cluster), size = 2) +
+  labs(title = "Clusters of Highly Related Samples ",
+       color = "Cluster ID") +
+  theme_minimal()
+#----------------------------------------------------------------------------------
+```
+
+## Transmission Network Plots
+```{r, }
+### RESISTANCE DATA FOR Maziba
+Res_genotypes <- read_csv("Resistance_Analysis/Resistance_Data/sample_genotypes_all.csv") #%>% select(-c(k13_C469Y, k13_C469F))
+# Keep only samples from Maziba
+Res_genotypes <- Res_genotypes %>% 
+  filter(Sample.Site == "Maziba") %>% dplyr::rename(sample_id=barcode)
+
+##### TABULATE Ns #####
+meta_long <- pivot_longer(Res_genotypes, cols = arps10_V127M:k13_C469F, names_to = "SNP", values_to = "Genotype") 
+
+#k13 only
+meta_long <- meta_long %>% filter(grepl("k13", SNP))
+###----------------------------------------------------------------------------------
+p441L <- meta_long %>% filter(SNP == "k13_P441L") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(P441L = Genotype)
+
+k13_675 <- meta_long %>% filter(SNP == "k13_A675V") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_675 = Genotype)
+
+k13_C469Y <- meta_long %>% filter(SNP == "k13_C469Y") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_C469Y = Genotype)
+
+k13_C469F <- meta_long %>% filter(SNP == "k13_C469F") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_C469F = Genotype)
+##--------------------------------------------------------------------------------
+#### Travel data 
+travel <- read_csv("Data/Survey_filtered_data.csv", 
+                   col_types = cols(starttime = col_date(format = "%Y-%m-%d"), 
+                                    date = col_date(format = "%Y-%m-%d"))) %>%
+  filter(mrccode == "Maziba") %>%
+  dplyr::select(sample_id, mrccode, dateofnight1st1, dateofnightlast1,date, ageyrs, agemonths, gender, villageresidence, parishresidence, districtresidence, 
+         furthesttravel, travelreason1, villagedestination1, parishdestination1, districtdestination1) %>% 
+  mutate(ageyrs = ifelse(is.na(ageyrs), agemonths/12, ageyrs)) %>% 
+  dplyr::select(-agemonths) %>% 
+  dplyr::rename(id = sample_id)
+
+table(travel$furthesttravel, useNA = "always") 
+table(travel$furthesttravel, travel$mrccode, useNA = "always") 
+
+travel1 <- travel %>% 
+  mutate(furthesttravel = ifelse(furthesttravel == "Inside village", "No travel", furthesttravel )) %>% 
+  mutate(furthesttravel = ifelse((furthesttravel == "Outside parish but inside subcounty" | furthesttravel =="Outside subcounty inside district" | furthesttravel == "Outside village but inside parish"), "Inside district", furthesttravel))
+
+table(travel1$furthesttravel, travel1$mrccode, useNA = "always") 
+#-------------------------------------------------------------------------------
+
+travel_for_merge <- travel1 %>% dplyr::rename(sample_id = id)
+
+##
+maziba_travel <- travel_for_merge %>%
+  mutate(furthesttravel = ifelse(is.na(furthesttravel), "Missing data", furthesttravel)) %>%
+  mutate(furthesttravel = factor(furthesttravel, levels = c(
+    "Outside district inside country", 
+    "Inside district", 
+    "No travel", 
+    "Missing data"
+  ), ordered = TRUE))
+
+
+table(maziba_travel$furthesttravel)
+levels(maziba_travel$furthesttravel)
+
+is.ordered(maziba_travel$furthesttravel)
+str(maziba_travel$furthesttravel)
+
+## Transmission Network data
+Maziba_cs <- readRDS("Transmission_Network_Analysis/maziba_inferred_network_edges_cs.rds")
+#
+edge_output <- Maziba_cs %>%
+  dplyr::rename(from = parent_node, to = sample_id, prob = mean_posterior_prob)
+
+# Remove edges from nodes with `_copy` as from — we don't want `_copy` nodes in the plot
+edge_output_clean <- edge_output %>%
+  filter(!str_detect(from, "_copy$"))
+#
+real_node_ids <- unique(c(edge_output$to, edge_output_clean$from))
+                        
+founder_nodes <- setdiff(edge_output_clean$from, edge_output_clean$to)
+## Observed founders (no incoming edge)
+observed_founders <- setdiff(edge_output_clean$from, edge_output_clean$to)
+
+## Singleton founders (only infected by _copy and never infected by anyone else)
+singleton_founders <- edge_output %>%
+  filter(str_detect(from, "_copy$")) %>%
+  pull(to) %>%
+  setdiff(edge_output_clean$to)
+
+# Combine both groups
+all_founders <- union(observed_founders, singleton_founders)
+#
+graph_nodes_annotated <- tibble(name = real_node_ids) %>%
+  left_join(maziba_travel, by = c("name" = "sample_id")) %>%
+  left_join(p441L,         by = c("name" = "id")) %>%
+  left_join(k13_675,       by = c("name" = "id")) %>%
+  left_join(k13_C469Y,     by = c("name" = "id")) %>%
+  left_join(k13_C469F,     by = c("name" = "id")) %>%
+  mutate(
+    founder = name %in% all_founders,
+    #month_year = paste0(month(date, label = TRUE, abbr = TRUE), "_", str_sub(year(date), 3, 4)),
+    month_year = paste0(lubridate::month(date, label = TRUE, abbr = TRUE), "_", stringr::str_sub(lubridate::year(date), 3, 4)),
+    month_year = factor(month_year, levels = unique(month_year[order(date)]), ordered = TRUE)
+  )
+## Replace all NAs with "Missing data"
+graph_nodes_annotated <- graph_nodes_annotated %>%
+  mutate(furthesttravel = replace_na(furthesttravel, "Missing data"))
+
+table(graph_nodes_annotated$furthesttravel)
+
+# Create final transmission graph
+final_graph <- graph_from_data_frame(
+  d = edge_output_clean,
+  vertices = graph_nodes_annotated,
+  directed = TRUE
+)
+```
+
+## Transmission Network Plot with fixed clusters
+```{r,}
+set.seed(100)
+## Generate layout positions using one graph (say dcifer)
+shared_layout <- create_layout(final_graph, layout = "fr")
+
+shared_layout <- shared_layout %>%
+  mutate(
+    furthesttravel = factor(
+      furthesttravel,
+      levels = c(
+        "Outside district inside country",
+        "Inside district",
+        "No travel",
+        "Missing data"
+      )
+    )
+  )
+
+Maziba_travel_plot <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Maziba Transmission Network")
+
+Maziba_travel_plot
+
+ggsave("DCIFER_RESULTS/Maziba_TN_Clusters_fixed_travel.png",Maziba_travel_plot, width = 10, height = 8, units = "in")
+###=================================================================================
+
+### A figure to include in the panel
+set.seed(100)
+shared_layout <- create_layout(final_graph, layout = "fr")
+
+shared_layout <- shared_layout %>%
+  mutate(
+    furthesttravel = factor(
+      furthesttravel,
+      levels = c(
+        "Outside district inside country",
+        "Inside district",
+        "No travel",
+        "Missing data"
+      )
+    )
+  )
+
+Maziba_plot <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6)) +  # Increased size
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+## increase the size of the legend key
+Maziba_plot <- Maziba_plot +
+  theme(
+    legend.key.size = unit(1.5, "cm"),  # Increase the legend key size
+    legend.text = element_text(size = 12),  # Increase legend text size
+    legend.title = element_text(size = 14, face = "bold")  # Bigger, bold titles
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),  # bigger points in color legend
+    shape = guide_legend(override.aes = list(size = 5))   # bigger shapes for founder legend
+  )
+    
+Maziba_plot
+
+ggsave("Final_Manuscript_Figures/Maziba_TN_Clusters_fixed_travel.png",Maziba_plot, width = 9, height = 9, units = "in")
+##-------------------------------------------------------------------------------
+
+### Extract the legend and remove it from the network plot
+# Function to extract legend
+get_legend_plot <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend_index <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[legend_index]]
+}
+
+# Plot WITH only two legends
+Maziba_plot_with_legend <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6), guide = "none") +  # <-- no size legend
+  theme_void() +
+  theme(
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+# Extract legend
+legend_plot <- get_legend_plot(Maziba_plot_with_legend)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Transmission_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 4.5, dpi = 300, bg = "white")
+
+# Main plot WITHOUT legend
+Maziba_plot_clean <- Maziba_plot_with_legend +
+  theme(legend.position = "none")
+
+Maziba_plot_clean
+ggsave("Final_Manuscript_Figures/Maziba_TN_Clusters_No_Legend.png",Maziba_plot_clean, width = 9, height = 9, units = "in", bg="white")
+```
+
+### Transmission networks with probability-weighted edges
+```{r,}
+set.seed(100)
+
+Maziba_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE
+  ) +
+
+  # Edge legend scales: fixed 0–1 range, same breaks for all sites
+  scale_edge_alpha(
+    range  = c(0.25, 1),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range  = c(0.4, 2),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+
+  # Nodes
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  theme_void() +
+ theme(
+    legend.position = "none"
+  )
+
+Maziba_trans_clean
+
+ggsave("Final_Manuscript_Figures/Maziba_TN_Clusters_trans1_clean.png",
+       Maziba_trans_clean, width = 9, height = 9, units = "in", bg = "white")
+##----------------------------------------------------------------------------------------
+
+### With a standard scale for this plot
+Maziba_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE
+  ) +
+
+  # Edge legend scales: fixed 0–1 range, same breaks for all sites
+  scale_edge_alpha(
+    range  = c(0.25, 1),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range  = c(0.4, 2),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+
+  # Nodes
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title    = element_text(size = 12, face = "bold"),
+    legend.text     = element_text(size = 11)
+  )
+
+Maziba_trans_clean
+ggsave("Final_Manuscript_Figures/Maziba_TN_Clusters_trans1_legend.png",
+       Maziba_trans_clean, width = 12, height = 9, units = "in", bg = "white")
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(Maziba_trans_clean)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Maziba_trans_clean_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 4, dpi = 300, bg = "white")
+```
+
+
+## DCIFER Network Plot with fixed clusters
+```{r, warning=FALSE}
+set.seed(100)
+# Extract node positions from shared layout
+
+#Extract node name and x/y
+transmission_layout <- shared_layout %>% 
+  dplyr::select(name, x, y)
+
+##
+tg_with_coords <- tg %>%
+  activate(nodes) %>%
+  left_join(transmission_layout, by = "name")
+
+## Plot
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Transparent, thin, gray edges
+  geom_edge_link(
+    alpha = 0.2,
+    color = "gray70",
+    edge_width = 0.4
+  ) +
+  # Optional: Use curved edges to reduce clutter
+  # geom_edge_fan(alpha = 0.2, color = "gray70", edge_width = 0.3)
+
+  # Plot nodes by cluster
+  geom_node_point(
+    aes(color = cluster),
+    size = 3
+  ) +
+  scale_color_manual(values = cluster_colors) +  # Make sure this exists
+  labs(title = "Maziba Clusters (dcifer)", color = "Cluster ID") +
+  coord_fixed() +
+  # Clean white background
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+###-------------------------------------------------------
+## Excluding long edges from the plot
+# Extract layout (should be character node names)
+transmission_layout <- shared_layout %>% dplyr::select(name, x, y)
+
+#
+tg_with_coords <- tg %>%
+  activate(nodes) %>%
+  left_join(transmission_layout, by = "name")
+
+## Add travel info
+nodes_tbl <- tg_with_coords %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  left_join(maziba_travel, by = c("name" = "sample_id"))
+##
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  left_join(maziba_travel, by = c("name" = "sample_id"))
+##
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  mutate(
+    furthesttravel = replace_na(furthesttravel, "Missing data")
+  )
+
+ # Extract edge table and node table
+edges_tbl <- tg_with_coords %>%
+  activate(edges) %>%
+  as_tibble()
+#
+nodes_tbl <- tg_with_coords %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  mutate(row_id = row_number())
+#
+node_id_lookup <- tibble(
+  index = 1:nrow(nodes_tbl),
+  name = nodes_tbl$name
+)
+
+##
+edge_df <- edges_tbl %>%
+  mutate(
+    from = node_id_lookup$name[from],
+    to   = node_id_lookup$name[to]
+  )
+
+# Join coordinates to calculate edge lengths
+edge_coords <- edge_df %>%
+  left_join(transmission_layout %>% dplyr::rename(from = name, x_from = x, y_from = y), by = "from") %>%
+  left_join(transmission_layout %>% dplyr::rename(to = name, x_to = x, y_to = y), by = "to") %>%
+  mutate(
+    edge_length = sqrt((x_to - x_from)^2 + (y_to - y_from)^2)
+  )
+
+##
+# Filter long edges
+threshold <- 5
+short_edges <- edge_coords %>% filter(edge_length <= threshold)
+
+## Plot
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.2,
+    color = "gray70",
+    linewidth = 0.4,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = cluster),
+    size = 3
+  ) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "Maziba Clusters (dcifer)", color = "Cluster ID") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Maziba_dcifer_Clusters_fixed.png", dcifer_plot, width = 10, height = 8, units = "in")
+
+##--------------------------------------------------------------------
+# Colour by travel history
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    na.value = "gray80"
+  ) +
+  labs(title = "Maziba Dcifer Network", color = "Travel History") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Maziba_dcifer_Clusters_fixed_travel.png", dcifer_plot, width = 10, height = 8, units = "in")
+##----------------------------------------------------------------------------------
+
+# Function to extract legend
+get_legend_plot <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend_index <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[legend_index]]
+}
+
+# --- Create plot WITH legend ---
+dcifer_plot_with_legend <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6   # 🔥 Increased node size
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel History"
+  ) +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5))  # bigger dots in legend
+  )
+
+# --- Extract legend ---
+legend_plot <- get_legend_plot(dcifer_plot_with_legend)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+#ggsave("Final_Manuscript_Figures/Dcifer_legend.png",
+#       plot = arrangeGrob(legend_plot),
+ #      width = 3.5, height = 3, dpi = 300, bg = "white")
+
+# Main plot WITHOUT legend
+Maziba_plot_clean <- dcifer_plot_with_legend +
+  theme(legend.position = "none")
+
+Maziba_plot_clean
+
+# Save clean plot
+ggsave("Final_Manuscript_Figures/Maziba_dcifer_No_Legend.png",
+       plot = Maziba_plot_clean,
+       width = 9, height = 9, dpi = 300, bg = "white")
+```
+
+### Build a DCIFER network plot with thickened edges based on r
+```{r,}
+set.seed(100)
+
+short_edges$Pairwise_IBD <- as.numeric(short_edges$ibd)
+
+## With no Legend
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = FALSE,   # ← turn off legend here
+    inherit.aes = FALSE
+  ) +
+  scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: same travel-history colors as before
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6,
+    show.legend = FALSE      # ← also turn off legend here
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80"
+  ) +
+  scale_linewidth_continuous(range = c(0.3, 2.5)) +
+  scale_alpha_continuous(range = c(0.2, 1)) +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    legend.position = "none",   # ← remove all legends
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Maziba_Dcifer_Ibd_No_legend.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+### ==================================================================
+
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+  scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 8
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+   scale_x_continuous(expand = expansion(mult = 0.04)) +
+  scale_y_continuous(expand = expansion(mult = 0.04)) +
+  
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.margin = margin(-5, -5, -5, -5),
+    legend.position = "none" 
+  )
+
+dcifer_plot
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Maziba_Dcifer_Ibd_legend2.png",
+       plot = dcifer_plot,
+       width = 8, height = 8, units = "in", bg = "white")
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Maziba_Dcifer_Ibd_legend3.png",
+       plot = dcifer_plot,
+       width = 16, height = 13, units = "in", bg = "white")
+##------------------------------------------------------------------------------
+##### With a standard scale
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+  scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size  = unit(1.3, "cm"),
+    legend.text      = element_text(size = 11),
+    legend.title     = element_text(size = 13, face = "bold")
+  )
+
+dcifer_plot
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Maziba_Dcifer1_Ibd_legend.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(dcifer_plot)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Maziba_dcifer_legend1.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 6, dpi = 300, bg = "white")
+```
