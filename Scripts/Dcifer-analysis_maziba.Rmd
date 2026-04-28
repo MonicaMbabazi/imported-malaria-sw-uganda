@@ -1,0 +1,170 @@
+---
+title: "Dcifer Analysis"
+author: "Monica Mbabazi"
+date: "2025-04-21st"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#rm(list=ls(all=TRUE))
+## Loading required libraries
+library(dcifer)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(ggplot2)
+library(readr)
+library(plotly)
+library(ggnewscale)
+library(tidyverse)
+library(descriptr)
+library(ggraph)
+library(igraph)
+library(grid)
+library(kableExtra)
+library(cluster)  # For kmeans clustering
+library(mclust)  
+setwd("/home/monica/Desktop/IMMRSE_Study/IMMRSE-Concept/Manuscript_Analysis_03_2025/")
+```
+
+#### Running Dcifer on Muko, Chahafi, and Maziba Data
+*Dcifer takes Moire output as its input*
+```{r, echo=TRUE}
+## Loading  and reading the data for Dcifer
+## Moire outputs
+maziba_moire_results <- readr::read_rds("MOIRE_RESULTS/Maziba/Maziba_mcmc_results.rds")
+maziba_data_moire <- read.csv("Data/Maziba_filtered_data.csv")
+#maziba_data_moire <- read.csv("Data_To_Run_TNM_By_Max/Maziba_filtered_allele_data.csv")
+#
+length(unique(maziba_data_moire$sample_id))
+#-------------------------------------------------------------------------------------
+maziba_data <- moire::load_long_form_data(maziba_data_moire)
+##
+calculate_median_afs <- function(x) {
+  median_afs <- lapply(x$chains[[1]]$allele_freqs, function(af) {
+    mat <- matrix(unlist(af), ncol = length(af))
+    d <- dist(t(mat))
+    af[[which.min(rowSums(as.matrix(d)))]]
+  })
+  return(median_afs)
+}
+# Calculate median allele frequencies for each site
+maziba_median_afs <- calculate_median_afs(maziba_moire_results)
+# Define uninformative loci for each site
+ma_uninformative_loci <- maziba_data$uninformative_loci
+# Remove uninformative loci
+filtered_maziba <- maziba_data_moire %>% filter(!locus %in% ma_uninformative_loci)
+
+## RUN DCIFER
+# Format for DCiFER
+maziba_dsmp <- dcifer::formatDat(filtered_maziba, "sample_id", "locus", "allele")
+# COI
+maziba_coi <- moire::summarize_coi(maziba_moire_results)$post_coi_med
+
+maziba_dsmp <- dcifer::matchAfreq(maziba_dsmp, maziba_median_afs)
+
+## IBD per site
+dres_maziba <- ibdDat(maziba_dsmp, maziba_coi, maziba_median_afs, pval = TRUE, confint = TRUE, rnull = 0, alpha = 0.05, nr = 1e3)
+
+```
+
+#### Sample Relatedness
+```{r,}
+#### % of related samples
+# Extract p-values
+p_values_maziba <- dres_maziba[,, "p_value"]
+
+# Define significance threshold
+significance_threshold <- 0.05
+
+# Filter significant samples based on p-values
+significant_samples_maziba <- which(dres_maziba[,, "p_value"] <= significance_threshold, arr.ind = TRUE)
+
+# Compute total number of samples per site
+total_samples_maziba <- length(unique(c(rownames(dres_maziba), colnames(dres_maziba))))
+
+# Compute number of significantly related samples per site
+n_maziba <- length(unique(c(significant_samples_maziba[,1], significant_samples_maziba[,2])))
+
+### Computing the % of significantly related pairs of samples
+nsmp   <- dim(dres_maziba)[1]  
+npairs <- choose(nsmp, 2) 
+percent_signif_maziba <- n_maziba/npairs*100 
+
+
+## Computing number related samples not pairs
+## number of samples that are significantly related to at least one other sample in the dataset
+length(unique(as.integer(significant_samples_maziba))) ### 74 samples
+percent_signif_samples <- length(unique(as.integer(significant_samples_maziba)))/nsmp*100 
+
+```
+
+
+### Data visualization (heatmaps)
+```{r, heatmaps}
+# Extract IBD estimates for each site
+dmat_maziba <- dres_maziba[, , "estimate"]
+
+# Symmetrize the matrix
+dmat_maziba[upper.tri(dmat_maziba)] <- t(dmat_maziba)[upper.tri(t(dmat_maziba))]
+
+# p-values
+dres0 <- dres_maziba[, , "p_value"]
+dres_low <- -log10(dres0)
+
+dres_low[dres_low > -log10(0.001)] <- "High"
+dres_low[dres_low <= -log10(0.01) & dres_low > -log10(0.05)] <- "Low"
+dres_low[dres_low <= -log10(0.001) & dres_low > -log10(0.01)] <- "Moderate"
+dres_low[dres_low <= -log10(0.05)] <- "No"
+dres_low[upper.tri(dres_low)] <- t(dres_low)[upper.tri(dres_low)]
+
+matrix_to_longformat <- function(mat) {
+  as.data.frame(mat) |>
+    tibble::rownames_to_column("sample.x") |>
+    tidyr::pivot_longer(-sample.x, names_to = "sample.y", values_to = "value")
+}
+# Convert to long format for plotting
+to_plot1 <- matrix_to_longformat(dmat_maziba)
+
+# Perform hierarchical clustering on the thresholded IBD matrix
+hc <- hclust(as.dist(1 - dmat_maziba))
+order <- hc$order
+clustered_levels <- colnames(dmat_maziba)[order]
+
+# Reorder samples based on clustering
+to_plot1 <- to_plot1 |>
+  dplyr::mutate(sample.x = forcats::fct_relevel(sample.x, clustered_levels),
+                sample.y = forcats::fct_relevel(sample.y, clustered_levels))
+
+to_plot2 <- matrix_to_longformat(dres_low)
+to_plot2 <- to_plot2 |>
+  dplyr::mutate(sample.x = forcats::fct_relevel(sample.x, clustered_levels),
+                sample.y = forcats::fct_relevel(sample.y, clustered_levels))
+
+# Define color scales
+colours_upper <- colorRampPalette(c("#FFFFFF", "#1520A6"))(100)
+colours_lower <- c("High" = "#C70039", "Moderate" = "#FF5733", "Low" = "#FFC300", "No" = "gray")
+
+# Combined Heatmap 
+plot1 <- ggplot(to_plot1, aes(x = sample.x, y = sample.y)) +
+  geom_raster(data = subset(to_plot1, as.numeric(sample.x) > as.numeric(sample.y)), aes(fill = value)) +
+  scale_fill_gradientn(colors = colours_upper, name = "Relatedness") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 0)) +
+  theme(axis.text.y = element_text(hjust = 0)) +
+  new_scale_fill() + # Add the p-value layer
+  geom_tile(data = subset(to_plot2, as.numeric(sample.x) < as.numeric(sample.y)),
+            aes(fill = value)) +
+  scale_fill_manual(values = colours_lower, name = "Significance", breaks = c("High", "Moderate", "Low", "No")) +
+  scale_x_discrete(limits = clustered_levels) +
+  scale_y_discrete(limits = clustered_levels)
+
+plot1
+ggsave("DCIFER_RESULTS/Maziba_heatmap.png", plot1, width = 10, height = 8, units = "in")
+
+```
+
+
