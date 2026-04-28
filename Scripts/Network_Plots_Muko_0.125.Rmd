@@ -1,0 +1,1347 @@
+---
+title: "Dcifer Analysis: Figure 3"
+author: "Monica Mbabazi"
+date: "2025-08-19th"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls(all=TRUE))
+## Loading required libraries
+library(dcifer)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(ggplot2)
+library(readr)
+library(plotly)
+library(ggnewscale)
+library(tidyverse)
+library(descriptr)
+library(ggraph)
+library(igraph)
+library(grid)
+library(kableExtra)
+library(cluster)  # For kmeans clustering
+library(mclust) 
+library(tidygraph)
+library(gridExtra)
+library(cowplot)
+library(png)
+library(grid)
+library(forcats)
+library(ggplot2)
+library(scales)
+library(ggnewscale)
+setwd("/home/monica/Desktop/IMMRSE_Study/IMMRSE-Concept/Manuscript_Analysis_03_2025/")
+```
+
+#### Running Dcifer on Muko Data (Fig3)
+```{r, echo=TRUE}
+## Loading  and reading the data for Dcifer
+## Moire outputs
+muko_moire_results <- readr::read_rds("MOIRE_RESULTS/Muko/Muko_mcmc_results.rds")
+
+## Moire data
+muko_data_moire <- read.csv("Filtered_data/Muko_filtered_TNM_data.csv", header = T)
+#muko_data_moire <- muko_data_moire %>% rename("allele"="PseudoCIGAR")
+# Format the data
+muko_data <- moire::load_long_form_data(muko_data_moire)
+
+# Function to calculate median allele frequencies
+calculate_median_afs <- function(x) {
+  median_afs <- lapply(x$chains[[1]]$allele_freqs, function(af) {
+    mat <- matrix(unlist(af), ncol = length(af))
+    d <- dist(t(mat))
+    af[[which.min(rowSums(as.matrix(d)))]]
+  })
+  return(median_afs)
+}
+# Calculate median allele frequencies for each site
+muko_median_afs <- calculate_median_afs(muko_moire_results)
+
+# Define uninformative loci for each site
+mu_uninformative_loci <- muko_data$uninformative_loci
+
+# Filter data for each site
+filtered_muko <- muko_data_moire %>% filter(!locus %in% mu_uninformative_loci)
+
+# Prepare DCIFER input for each site
+muko_dsmp<- dcifer::formatDat(filtered_muko, "sample_id", "locus", "allele")
+### COI
+muko_coi   <- moire::summarize_coi(muko_moire_results)$post_coi_med
+
+### Median frequency
+muko_dsmp <- dcifer::matchAfreq(muko_dsmp, muko_median_afs)
+
+## IBD per site
+dres_df <-ibdDat(muko_dsmp, muko_coi, muko_median_afs, pval = TRUE, confint = TRUE, rnull = 0.125, alpha = 0.05, nr = 1e3)
+```
+
+#### Highly related pairs
+```{r,}
+# Extract IBD estimates from rnull = 0.25 run
+ibd_est <- dres_df[, , "estimate"]
+ibd_lower <- dres_df[, , "CI_lower"]
+ibd_upper <- dres_df[, , "CI_upper"]
+
+#rnull = 0.125
+ibd_df <- as.data.frame(ibd_est)
+ibd_df <- tibble::rownames_to_column(ibd_df, var = "x")
+
+ibd_lower_df <- as.data.frame(ibd_lower)
+ibd_lower_df <- tibble::rownames_to_column(ibd_lower_df, var = "x")
+
+ibd_upper_df <- as.data.frame(ibd_upper)
+ibd_upper_df <- tibble::rownames_to_column(ibd_upper_df, var = "x")
+
+#this is a DF with all ibd data in longform between non-matching pairs of samples
+ibd_df_long <- ibd_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd"
+  ) %>% filter(!is.na(ibd)) 
+
+hist(ibd_df_long$ibd)
+
+#### BIND IN CI VALUES TO EACH DF ###############
+
+CI_lower_df_long <- ibd_lower_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd_lower")
+
+CI_upper_df_long <- ibd_upper_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd_upper")
+
+#bind CIs into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(CI_lower_df_long) %>% 
+  left_join(CI_upper_df_long)
+
+#### BIND IN P VALUES TO EACH DF ###############
+pvals <- dres_df[, , "p_value"]
+pvals <- as.data.frame(pvals)
+pvals <- tibble::rownames_to_column(pvals, var = "x")
+
+#pval 0.05
+pvals_df_long <- pvals %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "p_value"
+  ) %>% filter(!is.na(p_value)) %>% 
+  mutate(p_value = p_value/2) #divide by 2 for 1 sided test
+
+#bind pvals into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(pvals_df_long)
+
+
+#make p-value very large if r <0.125
+
+ibd_df_long <- ibd_df_long %>% mutate(p_value = ifelse(ibd <0.125, 1, p_value))
+
+#here is where i do corrections for rnull = 0.25 dataframe
+long_ibd1 <- ibd_df_long %>% 
+  mutate(p_BH = p.adjust(p_value, method = "BH"), 
+         p_BF = p.adjust(p_value, method = "bonferroni")) %>% 
+  mutate(sig_0.01 = ifelse(p_value < 0.01, 1, 0), sig_0.01_BH = ifelse(p_BH < 0.01, 1, 0), 
+         sig_0.01_BF = ifelse(p_BF < 0.01, 1, 0)) %>% 
+  mutate(sig_0.05 = ifelse(p_value < 0.05, 1, 0), sig_0.05_BH = ifelse(p_BH < 0.05, 1, 0),
+         sig_0.05_BF= ifelse(p_BF < 0.05, 1, 0)) %>% 
+  mutate(n = 1)
+
+#highly related pairs? 
+highly_related_df <- long_ibd1 %>% filter(sig_0.05_BH == 1)
+
+write.csv(highly_related_df, 
+          file = "Final_Manuscript_Figures/Re-analysis_Figs_2026/Muko_highly_rel-pairs.csv", 
+          row.names = FALSE)
+#highly related pairs out of all pairwise comparisons # 0.001724138 (0.17%)
+sum(long_ibd1$sig_0.05_BH)/sum(long_ibd1$n)
+
+range(highly_related_df$ibd, na.rm = TRUE) # 0.562 - 1.000
+```
+
+### Network plots based on DCIFER
+
+```{r,}
+# Extract IBD estimates for each site
+dmat_muko <- dres_df[, , "estimate"]
+all_samples <- rownames(dmat_muko)
+g <- graph_from_data_frame(highly_related_df, vertices = data.frame(name = all_samples), directed = FALSE)
+
+##
+clusters <- components(g)
+## Identify which samples are in a cluster with more than one node
+cluster_sizes <- table(clusters$membership)
+is_singleton_cluster <- cluster_sizes == 1
+
+## Re-assign singletons to a shared group (e.g., "Singleton")
+cluster_labels <- clusters$membership
+cluster_labels[is_singleton_cluster[cluster_labels]] <- "Singleton"
+
+tg <- as_tbl_graph(g) %>%
+  mutate(cluster = as.factor(cluster_labels))
+
+# Plot
+ggraph(tg, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = cluster), size = 2) +
+  labs(title = "Clusters of Highly Related Samples ",
+       color = "Cluster ID") +
+  theme_minimal()
+
+## Plot 2
+library(scales)
+
+## Build custom colors
+unique_clusters <- sort(unique(cluster_labels[cluster_labels != "Singleton"]))
+cluster_colors <- setNames(
+  c("gray", rainbow(length(unique_clusters))),
+  c("Singleton", unique_clusters)
+)
+
+# Plot
+p2 <-ggraph(tg, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = cluster), size = 3) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "Clusters of Highly Related Samples",
+       color = "Cluster ID") +
+  theme_minimal()+
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA))
+p2
+#ggsave("DCIFER_RESULTS/Muko_Dcifer_Network_plot.png", p2, width = 10, height = 8, units = "in")
+
+```
+
+## Transmission Network Plots
+
+```{r, }
+### RESISTANCE DATA FOR Muko
+Res_genotypes <- read_csv("Resistance_Analysis/Resistance_Data/sample_genotypes_all.csv") #%>% select(-c(k13_C469Y, k13_C469F))
+# Keep only samples from Maziba
+Res_genotypes <- Res_genotypes %>% 
+  filter(Sample.Site == "Muko") %>% dplyr::rename(sample_id=barcode)
+
+##### TABULATE Ns #####
+meta_long <- pivot_longer(Res_genotypes, cols = arps10_V127M:k13_C469F, names_to = "SNP", values_to = "Genotype") 
+
+#k13 only
+meta_long <- meta_long %>% filter(grepl("k13", SNP))
+###----------------------------------------------------------------------------------
+k13_P441L <- meta_long %>% filter(SNP == "k13_P441L") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(P441L = Genotype)
+
+k13_675 <- meta_long %>% filter(SNP == "k13_A675V") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_675 = Genotype)
+
+k13_C469Y <- meta_long %>% filter(SNP == "k13_C469Y") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_C469Y = Genotype)
+
+k13_C469F <- meta_long %>% filter(SNP == "k13_C469F") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_C469F = Genotype)
+##--------------------------------------------------------------------------------
+#### Travel data 
+travel <- read_csv("Data/Survey_filtered_data.csv", 
+                   col_types = cols(starttime = col_date(format = "%Y-%m-%d"), 
+                                    date = col_date(format = "%Y-%m-%d"))) %>%
+  filter(mrccode == "Muko") %>%
+  dplyr::select(sample_id, mrccode, dateofnight1st1, dateofnightlast1, date, ageyrs, agemonths, gender, villageresidence, parishresidence, districtresidence, 
+         furthesttravel, travelreason1, villagedestination1, parishdestination1, districtdestination1) %>% 
+  mutate(ageyrs = ifelse(is.na(ageyrs), agemonths/12, ageyrs)) %>% 
+  dplyr::select(-agemonths) %>% 
+  dplyr::rename(id = sample_id)
+
+table(travel$furthesttravel, useNA = "always") 
+table(travel$furthesttravel, travel$mrccode, useNA = "always") 
+
+travel1 <- travel %>% 
+  mutate(furthesttravel = ifelse(furthesttravel == "Inside village", "No travel", furthesttravel )) %>% 
+  mutate(furthesttravel = ifelse((furthesttravel == "Outside parish but inside subcounty" | furthesttravel =="Outside subcounty inside district" | furthesttravel == "Outside village but inside parish"), "Inside district", furthesttravel))
+
+table(travel1$furthesttravel, travel1$mrccode, useNA = "always") 
+#-------------------------------------------------------------------------------
+
+travel_for_merge <- travel1 %>% dplyr::rename(sample_id = id)
+
+##
+muko_travel <- travel_for_merge %>%
+  mutate(furthesttravel = ifelse(is.na(furthesttravel), "Missing data", furthesttravel)) %>%
+  mutate(furthesttravel = factor(furthesttravel, levels = c(
+    "Outside district inside country", 
+    "Inside district", 
+    "No travel", 
+    "Missing data"
+  ), ordered = TRUE))
+
+
+table(muko_travel$furthesttravel)
+levels(muko_travel$furthesttravel)
+
+is.ordered(muko_travel$furthesttravel)
+str(muko_travel$furthesttravel)
+
+## Transmission Network data
+Muko_cs <- readRDS("Transmission_Network_Analysis/muko_inferred_network_edges_cs.rds")
+#
+edge_output <- Muko_cs %>%
+  dplyr::rename(from = parent_node, to = sample_id, prob = mean_posterior_prob)
+
+# Remove edges from nodes with `_copy` as from — we don't want `_copy` nodes in the plot
+edge_output_clean <- edge_output %>%
+  filter(!str_detect(from, "_copy$"))
+#
+real_node_ids <- unique(c(edge_output$to, edge_output_clean$from))
+                        
+founder_nodes <- setdiff(edge_output_clean$from, edge_output_clean$to)
+## Observed founders (no incoming edge)
+observed_founders <- setdiff(edge_output_clean$from, edge_output_clean$to)
+
+## Singleton founders (only infected by _copy and never infected by anyone else)
+singleton_founders <- edge_output %>%
+  filter(str_detect(from, "_copy$")) %>%
+  pull(to) %>%
+  setdiff(edge_output_clean$to)
+
+# Combine both groups
+all_founders <- union(observed_founders, singleton_founders)
+#
+graph_nodes_annotated <- tibble(name = real_node_ids) %>%
+  left_join(muko_travel, by = c("name" = "sample_id")) %>%
+  left_join(k13_P441L,         by = c("name" = "id")) %>%
+  left_join(k13_675,       by = c("name" = "id")) %>%
+  left_join(k13_C469Y,     by = c("name" = "id")) %>%
+  left_join(k13_C469F,     by = c("name" = "id")) %>%
+  mutate(
+    founder = name %in% all_founders,
+   # month_year = paste0(month(date, label = TRUE, abbr = TRUE), "_", str_sub(year(date), 3, 4)),
+   month_year = paste0(lubridate::month(date, label = TRUE, abbr = TRUE), "_", stringr::str_sub(lubridate::year(date), 3, 4)),
+
+    month_year = factor(month_year, levels = unique(month_year[order(date)]), ordered = TRUE)
+  )
+
+## Replace all NAs with "Missing data"
+graph_nodes_annotated <- graph_nodes_annotated %>%
+  mutate(furthesttravel = replace_na(furthesttravel, "Missing data"))
+
+table(graph_nodes_annotated$furthesttravel)
+# Create final transmission graph
+final_graph <- graph_from_data_frame(
+  d = edge_output_clean,
+  vertices = graph_nodes_annotated,
+  directed = TRUE
+)
+### Save this file
+
+write.csv(graph_nodes_annotated, 
+          file = "DCIFER_RESULTS/graph_nodes_annotated_muko.csv", 
+          row.names = FALSE)
+```
+
+### PLotting
+```{r, }
+## Plot with random cluster positions
+Muko_travel_plot <- ggraph(final_graph, layout = 'fr') +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Furthest Travel"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Muko Transmission Network")
+
+Muko_travel_plot
+
+ggsave("DCIFER_RESULTS/Muko_Travel_plot.png", Muko_travel_plot, width = 10, height = 8, units = "in")
+```
+
+## Transmission Network Plot with fixed clusters
+```{r,}
+set.seed(100)
+## Generate layout positions using one graph (say dcifer)
+shared_layout <- create_layout(final_graph, layout = "fr")
+##
+shared_layout <- shared_layout %>%
+  mutate(
+    furthesttravel = factor(
+      furthesttravel,
+      levels = c(
+        "Outside district inside country",
+        "Inside district",
+        "No travel",
+        "Missing data"
+      )
+    )
+  )
+
+## Transmission Network Plot
+Muko_travel_plot <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Muko Transmission Network")
+
+Muko_travel_plot
+
+ggsave("DCIFER_RESULTS/Muko_TN_Clusters_fixed_travel.png",Muko_travel_plot, width = 10, height = 8, units = "in")
+
+#### ### Extract the legend and remove it from the network plot
+# Function to extract legend
+get_legend_plot <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend_index <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[legend_index]]
+}
+
+# Plot WITH only two legends
+Muko_plot_with_legend <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6), guide = "none") +  # <-- no size legend
+  theme_void() +
+  theme(
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+# Extract legend
+legend_plot <- get_legend_plot(Muko_plot_with_legend)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+#ggsave("Final_Manuscript_Figures/Mu_Transmission_legend.png",
+ #      plot = arrangeGrob(legend_plot),
+  #     width = 3.5, height = 4.5, dpi = 300, bg = "white")
+
+# Main plot WITHOUT legend
+Muko_plot_clean <- Muko_plot_with_legend +
+  theme(legend.position = "none")
+
+Muko_plot_clean
+ggsave("Final_Manuscript_Figures/Muko_TN_Clusters_No_Legend.png",Muko_plot_clean, width = 9, height = 9, units = "in", bg="white")
+```
+### Transmission networks with probability-weighted edges
+```{r,}
+set.seed(100)
+
+Muko_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE
+  ) +
+
+  # Edge legend scales: fixed 0–1 range, same breaks for all sites
+  scale_edge_alpha(
+    range  = c(0.25, 1),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range  = c(0.4, 2),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+
+  # Nodes
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  theme_void() +
+ theme(
+    legend.position = "none"
+  )
+
+Muko_trans_clean
+
+ggsave("Final_Manuscript_Figures/Muko_TN_Clusters_trans_clean.png",
+       Muko_trans_clean, width = 9, height = 9, units = "in", bg = "white")
+##----------------------------------------------------------------------------------------
+
+Muko_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE     # <-- ENABLE LEGEND
+  ) +
+  
+  # Edge legend scales
+  scale_edge_alpha(
+    range = c(0.25, 1),
+    name = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range = c(0.4, 2),
+    name = "Transmission\nprobability"
+  ) +
+  
+  # Node appearance
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+  
+  # Combine the edge legends so they are not duplicated
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text  = element_text(size = 11)
+  )
+Muko_trans_clean
+
+ggsave("Final_Manuscript_Figures/Muko_TN_Clusters_trans_legend.png",
+       Muko_trans_clean, width = 12, height = 9, units = "in", bg = "white")
+##-----------------------------------------------------------------------------------
+### With a standard scale for this plot
+Muko_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE
+  ) +
+
+  # Edge legend scales: fixed 0–1 range, same breaks for all sites
+  scale_edge_alpha(
+    range  = c(0.25, 1),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range  = c(0.4, 2),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+
+  # Nodes
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title    = element_text(size = 12, face = "bold"),
+    legend.text     = element_text(size = 11)
+  )
+
+Muko_trans_clean
+ggsave("Final_Manuscript_Figures/Muko_TN_Clusters_trans_legend1.png",
+       Muko_trans_clean, width = 12, height = 9, units = "in", bg = "white")
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(Muko_trans_clean)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Muko_trans_clean_legend1.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 5, dpi = 300, bg = "white")
+
+```
+
+
+##### Investigate futher on these clusters in Muko
+```{r,}
+## Muko
+set.seed(100)
+
+# 1) Create a single, fixed layout on the FULL graph
+layout_full <- create_layout(final_graph, layout = "fr") %>%
+  as_tibble() %>%
+  select(name, x, y)
+
+# 2) Compute degree on the FULL graph (undirected degree for “singleton” test)
+deg_vec <- igraph::degree(final_graph, mode = "all")
+degree_df <- tibble(name = V(final_graph)$name, degree = as.numeric(deg_vec))
+
+# 3) Join coordinates + degree; pick the nodes to KEEP (degree > 0)
+node_pos <- layout_full %>%
+  left_join(degree_df, by = "name")
+
+keep_nodes <- node_pos %>%
+  filter(degree > 0) %>%
+  pull(name)
+
+# 4) Induce a subgraph of ONLY connected nodes (no singletons), but KEEP attributes
+g_clusters <- induced_subgraph(final_graph, vids = V(final_graph)[name %in% keep_nodes])
+
+# 5) Prepare manual coordinates for the subgraph (match to full layout)
+coord_map <- node_pos %>%
+  filter(name %in% keep_nodes) %>%
+  select(name, x, y)
+
+idx <- match(V(g_clusters)$name, coord_map$name)
+manual_x <- coord_map$x[idx]
+manual_y <- coord_map$y[idx]
+
+# 6) Clean up travel label (NAs -> "Missing data") & set fixed order
+#    (Do this on the vertex attributes directly to avoid surprises)
+vt <- vertex_attr(g_clusters)
+travel <- vt$furthesttravel
+travel[is.na(travel)] <- "Missing data"
+travel <- factor(
+  travel,
+  levels = c(
+    "Outside district inside country",
+    "Inside district",
+    "No travel",
+    "Missing data"
+  ),
+  ordered = TRUE
+)
+g_clusters <- set_vertex_attr(g_clusters, "furthesttravel", value = travel)
+
+# (Optional) If you want to color by SITE instead, set a factor here:
+# site_vals <- factor(vertex_attr(g_clusters, "site"),
+#                     levels = c("Kamwezi", "Maziba", "Muko"))
+# g_clusters <- set_vertex_attr(g_clusters, "site", value = site_vals)
+
+# 7) Plot with MANUAL layout (positions are fixed), edges & alpha from 'prob'
+#    Color by travel; shape by founder; hide size legend.
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  guides(size = "none") +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title       = element_text(hjust = 0.5, face = "bold")
+  ) +
+  ggtitle("Muko Transmission Network (clusters only)")
+
+print(p)
+##----------------------------------------------------------
+
+#### Label founder nodes by their sample Ids
+founder_labels <- tibble(
+  name    = V(g_clusters)$name,
+  founder = V(g_clusters)$founder,
+  x       = manual_x,
+  y       = manual_y
+) %>%
+  filter(founder == TRUE)  # keep only founders
+
+# Plot with founder labels
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  geom_text(
+    data = founder_labels,
+    aes(x = x, y = y, label = name),  # use 'name' for labels
+    vjust = -1,
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  guides(size = "none") +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title       = element_text(hjust = 0.5, face = "bold")
+  ) +
+  ggtitle("Muko Transmission Network (Clusters Only, Founders Labeled)")
+
+print(p)
+
+## 
+ggsave("DCIFER_RESULTS/Muko_TN_Clusters_with_IDs1.png", p, width = 10, height = 8, units = "in")
+##------------------------------------------------------------------------------------------
+
+### Identify samples in each cluster
+
+# 1. Convert to tidygraph if not already
+graph_tbl <- as_tbl_graph(g_clusters)
+
+# 2. Compute clusters (connected components)
+clusters <- components(as.igraph(graph_tbl))  # returns membership info
+
+# 3. Build node table with cluster ID
+node_clusters <- tibble(
+  name       = V(g_clusters)$name,
+  founder    = V(g_clusters)$founder,
+  furthesttravel = V(g_clusters)$furthesttravel,
+  cluster_id = clusters$membership
+)
+
+# 4. Optionally, renumber clusters from 1 to N
+node_clusters <- node_clusters %>%
+  mutate(cluster_id = as.integer(factor(cluster_id, levels = sort(unique(cluster_id)))))
+##
+node_clusters <- node_clusters %>%
+  arrange(cluster_id, desc(founder)) %>% rename(sample_id=name)
+
+### Add more columns from the survey data
+# Select only the columns you want from Maziba_travel
+Muko_subset <- muko_travel %>%
+  select(sample_id, dateofnight1st1, dateofnightlast1, date, ageyrs, gender, villageresidence, districtdestination1)
+
+# Join
+# Join to node_clusters by sample_id
+node_clusters <- node_clusters %>%
+  left_join(Muko_subset, by = "sample_id")
+
+##
+write.csv(node_clusters, 
+          file = "DCIFER_RESULTS/Muko_node_clusters_Epi.csv", 
+          row.names = FALSE)
+```
+
+
+## DCIFER Network Plot with fixed clusters
+```{r, }
+set.seed(100)
+# Extract node positions from shared layout
+
+#Extract node name and x/y
+transmission_layout <- shared_layout %>% 
+  dplyr::select(name, x, y)
+
+##
+tg_with_coords <- tg %>%
+  activate(nodes) %>%
+  left_join(transmission_layout, by = "name")
+
+## Plot
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Transparent, thin, gray edges
+  geom_edge_link(
+    alpha = 0.2,
+    color = "gray70",
+    edge_width = 0.4
+  ) +
+  # Optional: Use curved edges to reduce clutter
+  # geom_edge_fan(alpha = 0.2, color = "gray70", edge_width = 0.3)
+
+  # Plot nodes by cluster
+  geom_node_point(
+    aes(color = cluster),
+    size = 3
+  ) +
+  scale_color_manual(values = cluster_colors) +  # Make sure this exists
+  labs(title = "Kamwezi Clusters (dcifer)", color = "Cluster ID") +
+  coord_fixed() +
+  # Clean white background
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+###-------------------------------------------------------
+## Excluding long edges from the plot
+# Extract layout (should be character node names)
+transmission_layout <- shared_layout %>% dplyr::select(name, x, y)
+
+#
+tg_with_coords <- tg %>%
+  activate(nodes) %>%
+  left_join(transmission_layout, by = "name")
+
+## Add travel info
+nodes_tbl <- tg_with_coords %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  left_join(muko_travel, by = c("name" = "sample_id"))
+
+##
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  left_join(muko_travel, by = c("name" = "sample_id"))
+##
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  mutate(
+    furthesttravel = replace_na(furthesttravel, "Missing data")
+  )
+
+ # Extract edge table and node table
+edges_tbl <- tg_with_coords %>%
+  activate(edges) %>%
+  as_tibble()
+
+#
+nodes_tbl <- tg_with_coords %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  mutate(row_id = row_number())
+#
+node_id_lookup <- tibble(
+  index = 1:nrow(nodes_tbl),
+  name = nodes_tbl$name
+)
+
+##
+edge_df <- edges_tbl %>%
+  mutate(
+    from = node_id_lookup$name[from],
+    to   = node_id_lookup$name[to]
+  )
+
+# Join coordinates to calculate edge lengths
+edge_coords <- edge_df %>%
+  left_join(transmission_layout %>% dplyr::rename(from = name, x_from = x, y_from = y), by = "from") %>%
+  left_join(transmission_layout %>% dplyr::rename(to = name, x_to = x, y_to = y), by = "to") %>%
+  mutate(
+    edge_length = sqrt((x_to - x_from)^2 + (y_to - y_from)^2)
+  )
+
+##
+# Filter long edges
+threshold <- 5
+short_edges <- edge_coords %>% filter(edge_length <= threshold)
+
+## Plot
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.2,
+    color = "gray70",
+    linewidth = 0.4,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = cluster),
+    size = 3
+  ) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "Muko Clusters (dcifer)", color = "Cluster ID") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Muko_dcifer_Clusters_fixed.png", dcifer_plot, width = 10, height = 8, units = "in")
+
+##----------------------------------------------
+# Colour by travel history
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    na.value = "gray80"
+  ) +
+  labs(title = "Muko Travel History", color = "Travel History") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Muko_dcifer_Clusters_fixed_travel.png", dcifer_plot, width = 10, height = 8, units = "in")
+##--------------------------------------------------------------------------------
+
+### Remove the title and the legend from the Dcifer plot
+# Function to extract legend
+get_legend_plot <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend_index <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[legend_index]]
+}
+
+# --- Create plot WITH legend ---
+dcifer_plot_with_legend <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6   # 🔥 Increased node size
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel History"
+  ) +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5))  # bigger dots in legend
+  )
+
+# --- Extract legend ---
+legend_plot <- get_legend_plot(dcifer_plot_with_legend)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Mu_Dcifer_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 3, dpi = 300, bg = "white")
+
+# Main plot WITHOUT legend
+Muko_plot_clean <- dcifer_plot_with_legend +
+  theme(legend.position = "none")
+
+Muko_plot_clean
+
+# Save clean plot
+ggsave("Final_Manuscript_Figures/Muko_dcifer_No_Legend.png",
+       plot = Muko_plot_clean,
+       width = 9, height = 9, units = "in", bg = "white")
+```
+
+### Build a DCIFER network plot with thickened edges based on r
+```{r,}
+set.seed(100)
+
+short_edges$Pairwise_IBD <- as.numeric(short_edges$ibd)
+
+## With no Legend
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+    scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+  coord_fixed() +
+  theme_void() +
+  theme(
+    legend.position = "none" 
+  )
+
+dcifer_plot
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Muko_Dcifer_Ibd_No_legend.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+###===================================================================
+
+##### With a standard scale
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+    scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size  = unit(1.3, "cm"),
+    legend.text      = element_text(size = 11),
+    legend.title     = element_text(size = 13, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Muko_Dcifer_Ibd_legend1.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+
+##------------------------------------------------------------------------------
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(dcifer_plot)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Muko_dcifer_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 6, dpi = 300, bg = "white")
+##----------------------------------------------------------------------------
+#### Increase the plot in size
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+    scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 8
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size  = unit(1.3, "cm"),
+    legend.position = "none",
+    plot.margin = margin(-5, -5, -5, -5),
+    legend.text      = element_text(size = 11),
+    legend.title     = element_text(size = 13, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Muko_Dcifer_ibd_No_Legend.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+
+###==========================================================================
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+  scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+  scale_x_continuous(expand = expansion(mult = 0.04)) +
+  scale_y_continuous(expand = expansion(mult = 0.04)) +
+
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.margin = margin(-5, -5, -5, -5),
+    legend.position = "none" 
+  )
+
+dcifer_plot
+
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Muko_Dcifer_ibd_No_Legend2.png",
+       plot = dcifer_plot,
+       width = 8, height = 8, units = "in", bg = "white")
+
+```

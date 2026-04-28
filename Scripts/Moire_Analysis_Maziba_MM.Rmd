@@ -1,0 +1,191 @@
+---
+title: "Moire Analysis for Maziba"
+author: "Monica Mbabazi"
+date: "2025-04-21st"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Clear all variables:
+#rm(list=ls(all=TRUE))
+
+# working directory
+setwd("/home/monica/Desktop/IMMRSE_Study/IMMRSE-Concept/Manuscript_Analysis_03_2025/")
+
+# Load necessary libraries
+library(dplyr)
+library(moire)
+library(stringr)
+library(ggplot2)
+library(readr)
+library(Hmisc)
+library(plotly)
+library(orca)
+library(magrittr)
+library(purrr)
+library(grid)
+
+## Let's read in data for Moire Analysis
+data <- read.csv("Data/Maziba_filtered_data.csv")
+
+## Data Exploration:
+n_alleles_per_locus_by_sample <- data |>
+    dplyr::group_by(sample_id, locus) |>
+    dplyr::summarize(n_alleles = dplyr::n_distinct(allele)) |>
+    dplyr::ungroup()
+
+p <- ggplot(n_alleles_per_locus_by_sample, aes(x = sample_id, group = n_alleles, fill = as.factor(n_alleles)), color = "black") +
+    geom_bar(position = "stack") +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_x_discrete(
+        limits = n_alleles_per_locus_by_sample |> 
+            dplyr::group_by(sample_id) |>
+            dplyr::summarize(avg_n_alleles = mean(n_alleles)) |>
+            dplyr::arrange(avg_n_alleles) |>
+            dplyr::ungroup() |>
+            dplyr::pull(sample_id)) +
+    xlab("Sample") +
+    ylab("Number of Alleles")
+p
+ggsave("MOIRE_RESULTS/Maziba/Maziba_allele_distribution.png", p, width = 10, height = 8, units = "in")
+
+# selecting columns to fit format requirements in moire
+data_moire = data %>%
+    select(sample_id,locus,allele)
+```
+
+## Moire Analysis
+
+```{r, }
+# Loading data into Moire
+data.moire = moire::load_long_form_data(data_moire)
+
+burnin <- 2e3
+num_samples <- 1e4
+pt_chains <- seq(1, .6, length.out = 40)
+num_threads <- 20
+pt_threads <- 20
+
+mcmc_results <- moire::run_mcmc(
+    data.moire,
+    is_missing = data.moire$is_missing,
+    allow_relatedness = TRUE,
+    max_coi = 40,
+    verbose = TRUE, burnin = burnin, samples_per_chain = num_samples,
+    pt_chains = pt_chains, pt_num_threads = num_threads, thin = 10, adapt_temp = TRUE,
+    r_beta = 3, r_alpha = 3,
+    eps_pos_alpha = 1, eps_pos_beta = 1, eps_neg_alpha = 1, eps_neg_beta = 1
+)
+
+# we need to save this out
+readr::write_rds(mcmc_results, file=file.path('MOIRE_RESULTS/Maziba/Maziba_mcmc_results.rds'))
+
+##### Summary of the data (COI, Relatedness, eff_COI, allele_freq, heterozygosity)
+coi_summary <- moire::summarize_coi(mcmc_results)
+relatedness_summary <- moire::summarize_relatedness(mcmc_results)
+eff_coi_summary <- moire::summarize_effective_coi(mcmc_results)
+allele_freq_summary <- summarize_allele_freqs(mcmc_results)
+he_summary <- moire::summarize_he(mcmc_results)
+
+# Write the summary outputs as CSV files
+write.csv(coi_summary, "MOIRE_RESULTS/Maziba/coi_summary.csv", row.names = FALSE)
+write.csv(relatedness_summary, "MOIRE_RESULTS/Maziba/relatedness_summary.csv", row.names = FALSE)
+write.csv(eff_coi_summary, "MOIRE_RESULTS/Maziba/eff_coi_summary.csv", row.names = FALSE)
+write.csv(allele_freq_summary, "MOIRE_RESULTS/Maziba/allele_freq_summary.csv", row.names = FALSE)
+write.csv(he_summary, "MOIRE_RESULTS/Maziba/heterozygosity_summary.csv", row.names = FALSE)
+```
+
+##### Post Moire Data visualization 
+```{r,}
+## Chain Swaps plot
+moire::plot_chain_swaps(mcmc_results)
+
+##########
+coi_res <- moire::summarize_coi(mcmc_results)
+ecoi_res <- moire::summarize_effective_coi(mcmc_results)
+relatedness <- moire::summarize_relatedness(mcmc_results) |>
+    dplyr::filter(!is.na(post_relatedness_mean))
+eps_pos <- moire::summarize_epsilon_pos(mcmc_results)
+eps_neg <- moire::summarize_epsilon_neg(mcmc_results)
+##
+prob_polyclonal <- data.frame(
+    sample_id = mcmc_results$args$data$sample_ids,
+    # the probability of being polyclonal is the posterior distribution of COI > 1
+    prob = sapply(mcmc_results$chains[[1]]$coi, \(x) mean(x > 1))
+)
+
+sample_results <- coi_res |>
+    dplyr::left_join(ecoi_res, by = "sample_id") |>
+    dplyr::left_join(relatedness, by = "sample_id") |>
+    dplyr::left_join(eps_pos, by = "sample_id") |>
+    dplyr::left_join(eps_neg, by = "sample_id") |>
+    dplyr::left_join(prob_polyclonal, by = "sample_id") |>
+    dplyr::mutate(sample_id = as.character(sample_id))
+###
+
+p1 <- ggplot(sample_results, aes(x = sample_id, y = post_eps_pos_med, ymin = post_eps_pos_lower, ymax = post_eps_pos_upper, color = as.factor(post_coi_med))) +
+    geom_pointrange() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    # sort x axis by median epsilon pos
+    scale_x_discrete(limits = sample_results |> dplyr::arrange(post_eps_pos_med) |> dplyr::pull(sample_id)) +
+    xlab("Sample") +
+    ylab("Posterior Epsilon Pos")
+p1
+ggsave("MOIRE_RESULTS/Maziba/pos_epsilon_plot.png", p1, width = 10, height = 8, units = "in")
+
+### False negative rates
+p2 <- ggplot(sample_results, aes(x = sample_id, y = post_eps_neg_med, ymin = post_eps_neg_lower, ymax = post_eps_neg_upper, color = as.factor(post_coi_med))) +
+    geom_pointrange() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    # sort x axis by median epsilon neg
+    scale_x_discrete(limits = sample_results |> dplyr::arrange(post_eps_neg_med) |> dplyr::pull(sample_id)) +
+    xlab("Sample") +
+    ylab("Posterior Epsilon Neg")
+ggsave("MOIRE_RESULTS/Maziba/Neg_epsilon_plot.png", p2, width = 10, height = 8, units = "in")
+
+### Looking at COI, effCOI and relatedness
+p3 <- ggplot(sample_results, aes(x = sample_id, y = post_relatedness_med, ymin = post_relatedness_lower, ymax = post_relatedness_upper, color = prob_polyclonal)) +
+    geom_pointrange() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    # sort x axis by median relatedness
+    scale_x_discrete(limits = sample_results |> dplyr::arrange(post_relatedness_med) |> dplyr::pull(sample_id)) +
+    xlab("Sample") +
+    ylab("Posterior Relatedness")
+ggsave("MOIRE_RESULTS/Maziba/within-host_relatedness.png", p3, width = 10, height = 8, units = "in")
+
+####  eCOI against COI
+p4 <- ggplot(sample_results, aes(x = post_coi_mean, xmin = post_coi_lower, xmax = post_coi_upper, y = post_effective_coi_mean, ymin = post_effective_coi_lower, ymax = post_effective_coi_upper, color = prob_polyclonal)) +
+    geom_point() +
+    geom_errorbar() +
+    # geom_errorbarh() +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+    xlab("Posterior COI") +
+    ylab("Posterior Effective COI")
+
+ggsave("MOIRE_RESULTS/Maziba/COI-Vs-effCOI.png", plot = p4, width = 10, height = 7, units = "in")
+
+##### COI Versus eff_COI with uncertainty while estimating COI
+
+p5 <- ggplot(sample_results, aes(x = post_coi_mean, xmin = post_coi_lower, xmax = post_coi_upper, y = post_effective_coi_mean, ymin = post_effective_coi_lower, ymax = post_effective_coi_upper, color = prob_polyclonal)) +
+    geom_point() +
+    geom_errorbar() +
+    geom_errorbarh() +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+    xlab("Posterior COI") +
+    ylab("Posterior Effective COI")
+ggsave("MOIRE_RESULTS/Maziba/coi-vs-eff_coi_W_uncertainity.png", p5, width = 10, height = 8, units = "in")
+
+####
+p6 <- ggplot(sample_results, aes(x = sample_id, y = post_coi_mean, ymin = post_coi_lower, ymax = post_coi_upper, color = post_effective_coi_mean > 1.1)) +
+    geom_point() +
+    geom_errorbar() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    scale_x_discrete(limits = sample_results |> dplyr::arrange(post_relatedness_mean) |> dplyr::pull(sample_id)) +
+    xlab("Sample") +
+    ylab("Posterior COI")
+ggsave("MOIRE_RESULTS/Maziba/coi_plot.png", p6, width = 10, height = 8, units = "in")
+```
+

@@ -1,0 +1,1619 @@
+---
+title: "Dcifer Analysis"
+author: "Monica Mbabazi"
+date: "2025-08-19th"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls(all=TRUE))
+## Loading required libraries
+library(dcifer)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(ggplot2)
+library(readr)
+library(plotly)
+library(ggnewscale)
+library(tidyverse)
+library(descriptr)
+library(ggraph)
+library(igraph)
+library(grid)
+library(kableExtra)
+library(cluster)  # For kmeans clustering
+library(mclust)  
+library(igraph)
+library(scales)
+library(tidygraph)
+library(gridExtra)
+setwd("/home/monica/Desktop/IMMRSE_Study/IMMRSE-Concept/Manuscript_Analysis_03_2025/")
+```
+
+#### Running Dcifer on Kamwezi Data
+```{r, echo=TRUE}
+## Moire outputs
+Kamwezi_moire_results <- readr::read_rds("MOIRE_RESULTS/Kamwezi/Kamwezi_mcmc_results.rds")
+
+## Moire data
+Kamwezi_data_moire <- read.csv("Filtered_data/Kamwezi_filtered_data.csv", header = T)
+#Kamwezi_data_moire <- Kamwezi_data_moire %>% rename("allele"="PseudoCIGAR")
+# Format the data
+Kamwezi_data <- moire::load_long_form_data(Kamwezi_data_moire)
+
+# Function to calculate median allele frequencies
+calculate_median_afs <- function(x) {
+  median_afs <- lapply(x$chains[[1]]$allele_freqs, function(af) {
+    mat <- matrix(unlist(af), ncol = length(af))
+    d <- dist(t(mat))
+    af[[which.min(rowSums(as.matrix(d)))]]
+  })
+  return(median_afs)
+}
+# Calculate median allele frequencies 
+Kamwezi_median_afs <- calculate_median_afs(Kamwezi_moire_results)
+# Define uninformative loci
+ka_uninformative_loci <- Kamwezi_data$uninformative_loci
+
+# Filter to remove these loci
+filtered_Kamwezi <- Kamwezi_data_moire %>% filter(!locus %in% ka_uninformative_loci)
+
+# Prepare DCIFER input for each site
+Kamwezi_dsmp<- dcifer::formatDat(filtered_Kamwezi, "sample_id", "locus", "allele")
+### COI
+Kamwezi_coi   <- moire::summarize_coi(Kamwezi_moire_results)$post_coi_med
+
+### Median frequency
+Kamwezi_dsmp <- dcifer::matchAfreq(Kamwezi_dsmp, Kamwezi_median_afs)
+
+## IBD per site
+dres_df <-ibdDat(Kamwezi_dsmp, Kamwezi_coi, Kamwezi_median_afs, pval = TRUE, confint = TRUE, rnull = 0.125, alpha = 0.05, nr = 1e3)
+
+```
+
+### Highly related pairs
+```{r,}
+### Visualize the distribution of IBD estimates
+# Extract IBD estimates from rnull = 0.25 run
+ibd_est <- dres_df[, , "estimate"]
+ibd_lower <- dres_df[, , "CI_lower"]
+ibd_upper <- dres_df[, , "CI_upper"]
+
+
+#do stupid stuff to make dataframe (there's probably a better way to to this)
+#rnull = 0.125
+ibd_df <- as.data.frame(ibd_est)
+ibd_df <- tibble::rownames_to_column(ibd_df, var = "x")
+
+ibd_lower_df <- as.data.frame(ibd_lower)
+ibd_lower_df <- tibble::rownames_to_column(ibd_lower_df, var = "x")
+
+ibd_upper_df <- as.data.frame(ibd_upper)
+ibd_upper_df <- tibble::rownames_to_column(ibd_upper_df, var = "x")
+
+#this is a DF with all ibd data in longform between non-matching pairs of samples
+ibd_df_long <- ibd_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd"
+  ) %>% filter(!is.na(ibd)) 
+
+hist(ibd_df_long$ibd)
+
+#### BIND IN CI VALUES TO EACH DF ###############
+
+CI_lower_df_long <- ibd_lower_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd_lower")
+
+CI_upper_df_long <- ibd_upper_df %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "ibd_upper")
+
+#bind CIs into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(CI_lower_df_long) %>% 
+  left_join(CI_upper_df_long)
+
+#### BIND IN P VALUES TO EACH DF ###############
+pvals <- dres_df[, , "p_value"]
+pvals <- as.data.frame(pvals)
+pvals <- tibble::rownames_to_column(pvals, var = "x")
+
+#pval 0.05
+pvals_df_long <- pvals %>%
+  pivot_longer(
+    cols = -x,
+    names_to = "y",
+    values_to = "p_value"
+  ) %>% filter(!is.na(p_value)) %>% 
+  mutate(p_value = p_value/2) #divide by 2 for 1 sided test
+
+#bind pvals into long df 
+ibd_df_long <- ibd_df_long %>% 
+  left_join(pvals_df_long)
+
+
+#make p-value very large if r <0.125
+
+ibd_df_long <- ibd_df_long %>% mutate(p_value = ifelse(ibd <0.125, 1, p_value))
+
+#here is where i do corrections for rnull = 0.25 dataframe
+long_ibd1 <- ibd_df_long %>% 
+  mutate(p_BH = p.adjust(p_value, method = "BH"), 
+         p_BF = p.adjust(p_value, method = "bonferroni")) %>% 
+  mutate(sig_0.01 = ifelse(p_value < 0.01, 1, 0), sig_0.01_BH = ifelse(p_BH < 0.01, 1, 0), 
+         sig_0.01_BF = ifelse(p_BF < 0.01, 1, 0)) %>% 
+  mutate(sig_0.05 = ifelse(p_value < 0.05, 1, 0), sig_0.05_BH = ifelse(p_BH < 0.05, 1, 0),
+         sig_0.05_BF= ifelse(p_BF < 0.05, 1, 0)) %>% 
+  mutate(n = 1)
+
+#highly related pairs? 
+highly_related_df <- long_ibd1 %>% filter(sig_0.05_BH == 1)
+write.csv(highly_related_df, 
+          file = "Final_Manuscript_Figures/Re-analysis_Figs_2026/Kamwezi_highly_rel-pairs.csv", 
+          row.names = FALSE)
+#highly related pairs out of all pairwise comparisons # 0.06363636 (6.36%)
+sum(long_ibd1$sig_0.05_BH)/sum(long_ibd1$n)
+
+## r ranges
+range(highly_related_df$ibd, na.rm = TRUE) # 0.294 - 1.000
+```
+
+### Network plots based on DCIFER
+```{r,}
+# Extract IBD estimates for each site
+dmat_Kamwezi <- dres_df[, , "estimate"]
+## Plotting: Include also the singletons in the plot
+g <- graph_from_data_frame(highly_related_df, vertices = data.frame(name = rownames(dmat_Kamwezi)), directed = FALSE)
+
+# Cluster detection
+clusters <- components(g)
+
+# Reassign singleton clusters to "Singleton"
+cluster_sizes <- table(clusters$membership)
+singleton_clusters <- names(cluster_sizes[cluster_sizes == 1])
+cluster_labels <- as.character(clusters$membership)
+cluster_labels[cluster_labels %in% singleton_clusters] <- "Singleton"
+
+# Relabel non-singleton clusters in descending size order (so biggest is "1")
+multi_cluster_sizes <- sort(table(cluster_labels[cluster_labels != "Singleton"]), decreasing = TRUE)
+new_ids <- setNames(seq_along(multi_cluster_sizes), names(multi_cluster_sizes))
+cluster_labels <- ifelse(cluster_labels == "Singleton", "Singleton", as.character(new_ids[cluster_labels]))
+
+# Build tidygraph
+tg <- as_tbl_graph(g) %>%
+  mutate(cluster = factor(cluster_labels, levels = c("Singleton", as.character(seq_along(multi_cluster_sizes)))))
+
+# Set colors: gray for singleton, rainbow for others
+cluster_colors <- setNames(
+  c("gray", rainbow(length(multi_cluster_sizes))),
+  levels(tg$cluster)
+)
+
+##
+# Plot
+p <- ggraph(tg, layout = "fr") +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes(color = cluster), size = 3) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "Clusters of Highly Related Samples (Kamwezi)",
+       color = "Cluster ID") +
+  theme_minimal() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA)
+  )
+
+p
+
+```
+
+## Transmission Network Plots
+```{r, }
+### Resistance data
+#subset these barcodes for the barcodes in our timeframe 
+Res_genotypes <- read_csv("Resistance_Analysis/Resistance_Data/sample_genotypes_all.csv")
+
+# Keep only samples from Kamwezi
+Res_genotypes <- Res_genotypes %>% 
+  filter(Sample.Site == "Kamwezi") %>% dplyr::rename(sample_id=barcode)
+
+##### TABULATE Ns #####
+##### TABULATE Ns #####
+meta_long <- pivot_longer(Res_genotypes, cols = arps10_V127M:k13_C469F, names_to = "SNP", values_to = "Genotype") 
+
+#k13 only
+meta_long <- meta_long %>% filter(grepl("k13", SNP))
+
+##
+k13_P441L <- meta_long %>% filter(SNP == "k13_P441L") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_P441L = Genotype)
+
+#
+k13_675 <- meta_long %>% filter(SNP == "k13_A675V") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_675 = Genotype)
+
+k13_C469Y <- meta_long %>% filter(SNP == "k13_C469Y") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_C469Y = Genotype)
+
+k13_C469F <- meta_long %>% filter(SNP == "k13_C469F") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_C469F = Genotype)
+
+k13_R561H <- meta_long %>% filter(SNP == "k13_R561H") %>% 
+  dplyr::select(sample_id, Genotype) %>% 
+  dplyr::rename(id = sample_id) %>% 
+  mutate(Genotype = ifelse(Genotype == 1 | Genotype == 2, "Mix or Mutant", "WT")) %>% 
+  dplyr::rename(k13_R561H = Genotype)
+
+#### Survey Data
+library(haven)
+
+zumba_travel <- read_dta("Data/Health_Facility_Survey_Kamwezi_24-01-2025.dta")
+names(zumba_travel)
+
+travel2 <- zumba_travel %>% dplyr::select(fpbarcode, furthest_travel, starttime, firstdate1, lastdate1) %>% 
+  dplyr::rename(id = fpbarcode, date = starttime)
+
+travel2 <- travel2 %>% mutate(furthesttravel = case_when(furthest_travel == 1 ~ "No travel", 
+                                                         furthest_travel >1 & furthest_travel <=4 ~ "Inside district", 
+                                                         furthest_travel == 5 ~ "Outside district inside country", 
+                                                         furthest_travel == 6 ~ "Outside country", 
+                                                         TRUE ~ "Missing data")) 
+table(travel2$furthesttravel)
+
+travel2 <- travel2 %>% dplyr::select(-furthest_travel)
+
+travel2 <- travel2 %>%
+  mutate(furthesttravel = ifelse(is.na(furthesttravel), "Missing data", furthesttravel)) %>%
+  mutate(furthesttravel = factor(furthesttravel, levels = c(
+    "Outside district inside country", 
+    "Inside district", 
+    "No travel", 
+    "Missing data"
+  ), ordered = TRUE))
+
+## Save this metadata as a csv file
+write.csv(travel2, "Data/travel_subset_cleaned_Kamw.csv", row.names = FALSE)
+###------------------------------------------------------------------------------------
+#### Transmission Network data
+kamwezi_cs <- readRDS("Transmission_Network_Analysis/kamwezi_inferred_network_edges_cs.rds")
+
+edge_output <- kamwezi_cs %>%
+  dplyr::rename(from = parent_node, to = sample_id, prob = mean_posterior_prob)
+
+# Remove edges from nodes with `_copy` as from — we don't want `_copy` nodes in the plot
+edge_output_clean <- edge_output %>%
+  filter(!str_detect(from, "_copy$"))
+#
+real_node_ids <- unique(c(edge_output$to, edge_output_clean$from))
+#
+founder_nodes <- setdiff(edge_output_clean$from, edge_output_clean$to)
+## Observed founders (no incoming edge)
+observed_founders <- setdiff(edge_output_clean$from, edge_output_clean$to)
+
+## Singleton founders (only infected by _copy and never infected by anyone else)
+singleton_founders <- edge_output %>%
+  filter(str_detect(from, "_copy$")) %>%
+  pull(to) %>%
+  setdiff(edge_output_clean$to)
+
+# Combine both groups
+all_founders <- union(observed_founders, singleton_founders)
+#
+graph_nodes_annotated <- tibble(name = real_node_ids) %>%
+  left_join(travel2, by = c("name" = "id")) %>%
+  left_join(k13_P441L,         by = c("name" = "id")) %>%
+  left_join(k13_675,       by = c("name" = "id")) %>%
+  left_join(k13_C469Y,     by = c("name" = "id")) %>%
+  left_join(k13_C469F,     by = c("name" = "id")) %>%
+  left_join(k13_R561H,     by = c("name" = "id")) %>%
+  mutate(
+    founder = name %in% all_founders
+  )
+#### ADD COI values 
+
+coi_df <- read.csv("MOIRE_RESULTS/Kamwezi/coi_summary.csv", header = TRUE) %>% rename(name = sample_id) 
+## 
+graph_nodes_annotated <- graph_nodes_annotated %>% 
+  left_join( coi_df %>% select(name, post_coi_med), by = "name" ) %>% 
+  rename(coi = post_coi_med)
+
+# Create final transmission graph
+final_graph <- graph_from_data_frame(
+  d = edge_output_clean,
+  vertices = graph_nodes_annotated,
+  directed = TRUE
+)
+##===================================================================
+
+## Plot
+kamwezi_travel_plot <- ggraph(final_graph, layout = 'fr') +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Furthest Travel"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Kamwezi Transmission Network Colored by Travel")
+
+kamwezi_travel_plot
+
+```
+
+## Transmission Network Plot with fixed clusters
+```{r,}
+set.seed(100)
+## Generate layout positions using one graph (say dcifer)
+shared_layout <- create_layout(final_graph, layout = "fr")
+#
+shared_layout <- shared_layout %>%
+  mutate(
+    furthesttravel = factor(
+      furthesttravel,
+      levels = c(
+        "Outside district inside country",
+        "Inside district",
+        "No travel",
+        "Missing data"
+      )
+    )
+  )
+
+## Transmission Network Plot
+kamwezi_travel_plot <- ggraph(shared_layout) +  # use shared_layout here
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside the country" = "#B22222",
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Kamwezi Transmission Network")
+
+kamwezi_travel_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_TN_Clusters_fixed_travel.png", kamwezi_travel_plot, width = 10, height = 8, units = "in")
+######--------------------------------------------------------------------------
+
+### By P441L
+kamwezi_mutation_plot <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = k13_P441L, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    na.value = "gray80",
+    name = "k13 P441L"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Kamwezi Transmission Network by k13_P441L")
+
+kamwezi_mutation_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_TN_Clusters_fixed_P441L.png", kamwezi_mutation_plot, width = 10, height = 8, units = "in")
+#---------------------------------------------------------------------
+## R561H
+kamwezi_mutation_plot <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = k13_R561H, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    na.value = "gray80",
+    name = "k13_R561H"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 3, `TRUE` = 3)) +
+  theme_void() +
+  guides(size = "none") +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  ) +
+  ggtitle("Kamwezi Transmission Network by k13_R561H")
+
+kamwezi_mutation_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_TN_Clusters_fixed_R561H.png", kamwezi_mutation_plot, width = 10, height = 8, units = "in")
+##----------------------------------------------------------------------------------------
+
+#### ### Extract the legend and remove it from the network plot
+# Function to extract legend
+get_legend_plot <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend_index <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[legend_index]]
+}
+
+# Plot WITH only two legends
+Kamwezi_plot_with_legend <- ggraph(shared_layout) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = furthesttravel, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    name = "Travel History"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6), guide = "none") +  # <-- no size legend
+  theme_void() +
+  theme(
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+# Extract legend
+legend_plot <- get_legend_plot(Kamwezi_plot_with_legend)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+#ggsave("Final_Manuscript_Figures/Mu_Transmission_legend.png",
+ #      plot = arrangeGrob(legend_plot),
+  #     width = 3.5, height = 4.5, dpi = 300, bg = "white")
+
+# Main plot WITHOUT legend
+Kamwezi_plot_clean <- Kamwezi_plot_with_legend +
+  theme(legend.position = "none")
+
+Kamwezi_plot_clean
+ggsave("Final_Manuscript_Figures/Kamwezi_TN_Clusters_No_Legend.png",Kamwezi_plot_clean, width = 9, height = 9, units = "in", bg="white")
+##--------------------------------------------------------------------------------------------
+```
+### Transmission networks with probability-weighted edges
+```{r, }
+set.seed(100)
+
+Kamwezi_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE
+  ) +
+
+  # Edge legend scales: fixed 0–1 range, same breaks for all sites
+  scale_edge_alpha(
+    range  = c(0.25, 1),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range  = c(0.4, 2),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+
+  # Nodes
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  theme_void() +
+ theme(
+    legend.position = "none"
+  )
+
+Kamwezi_trans_clean
+
+#ggsave("Final_Manuscript_Figures/Kamwezi_TN_Clusters_trans_No_legend.png",
+      # Kamwezi_trans_clean, width = 10, height = 9, units = "in", bg = "white")
+##----------------------------------------------------------------------------------------
+
+Kamwezi_trans_clean <- ggraph(shared_layout) +
+  geom_edge_link(
+    aes(alpha = prob, width = prob),
+    arrow   = arrow(type = "closed", length = unit(2, "mm")),
+    end_cap = circle(3, "mm"),
+    colour  = "black",
+    show.legend = TRUE
+  ) +
+
+  # Edge legend scales: fixed 0–1 range, same breaks for all sites
+  scale_edge_alpha(
+    range  = c(0.25, 1),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+  scale_edge_width(
+    range  = c(0.4, 2),
+    limits = c(0, 1),
+    breaks = c(0.25, 0.5, 0.75, 1.0),
+    name   = "Transmission\nprobability"
+  ) +
+
+  # Nodes
+  geom_node_point(
+    aes(color = furthesttravel, shape = founder),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    name = "Travel history"
+  ) +
+  scale_shape_manual(
+    values = c(`FALSE` = 16, `TRUE` = 17),
+    name   = "Founder"
+  ) +
+
+  guides(
+    edge_width = guide_legend(order = 1),
+    edge_alpha = guide_legend(order = 1),
+    color      = guide_legend(order = 2),
+    shape      = guide_legend(order = 3)
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "right",
+    legend.title    = element_text(size = 12, face = "bold"),
+    legend.text     = element_text(size = 11)
+  )
+
+Kamwezi_trans_clean
+
+#ggsave("Final_Manuscript_Figures/Kamwezi_TN_Clusters_trans_legend.png",
+ #      Kamwezi_trans_clean, width = 12, height = 9, units = "in", bg = "white")
+##------------------------------------------------------------------------------
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(Kamwezi_trans_clean)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+#ggsave("Final_Manuscript_Figures/Kamwezi_trans_clean_legend.png",
+ #      plot = arrangeGrob(legend_plot),
+  #     width = 3.5, height = 4.5, dpi = 300, bg = "white")
+
+```
+
+
+### Exclude the single nodes (nodes with no edges): Only Clusters and color them by Mutations
+```{r, }
+set.seed(100)
+## P441L
+# 1) Create a single, fixed layout on the FULL graph
+layout_full <- create_layout(final_graph, layout = "fr") %>%
+  as_tibble() %>%
+  select(name, x, y)
+
+# 2) Compute degree on the FULL graph (undirected degree for “singleton” test)
+deg_vec <- igraph::degree(final_graph, mode = "all")
+degree_df <- tibble(name = V(final_graph)$name, degree = as.numeric(deg_vec))
+
+# 3) Join coordinates + degree; pick the nodes to KEEP (degree > 0)
+node_pos <- layout_full %>%
+  left_join(degree_df, by = "name")
+
+keep_nodes <- node_pos %>%
+  filter(degree > 0) %>%
+  pull(name)
+
+# 4) Induce a subgraph of ONLY connected nodes (no singletons), but KEEP attributes
+g_clusters <- induced_subgraph(final_graph, vids = V(final_graph)[name %in% keep_nodes])
+
+# 5) Prepare manual coordinates for the subgraph (match to full layout)
+coord_map <- node_pos %>%
+  filter(name %in% keep_nodes) %>%
+  select(name, x, y)
+
+idx <- match(V(g_clusters)$name, coord_map$name)
+manual_x <- coord_map$x[idx]
+manual_y <- coord_map$y[idx]
+
+# 6) Clean up k13_P441L labels (NAs -> "Missing data") & set fixed order
+vt <- vertex_attr(g_clusters)
+k13 <- vt$k13_P441L
+k13[is.na(k13)] <- "Missing data"
+k13 <- factor(
+  k13,
+  levels = c("WT", "Mix or Mutant", "Missing data"),
+  ordered = TRUE
+)
+g_clusters <- set_vertex_attr(g_clusters, "k13_P441L", value = k13)
+
+# 7) Plot with MANUAL layout (positions are fixed), edges & alpha from 'prob'
+#    Color by k13_P441L; shape by founder; hide size legend.
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = k13_P441L, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    name = "k13_P441L"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6)) +
+  guides(size = "none") +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  )+
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+print(p)
+
+#ggsave("Final_Manuscript_Figures/Kamwezi_P441L.png", p, width = 10, height = 8, units = "in")
+
+### 
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(p)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Kamwezi_P441L_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3, height = 4, dpi = 300, bg = "white")
+##--------------------------------------------------------------------------------------------
+## Remove the legend from the figure
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = k13_P441L, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    name = "k13_P441L"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6)) +
+  guides(size = "none") +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.position = "none",
+    legend.title = element_text(size = 14, face = "bold")
+  )+
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+print(p)
+
+#ggsave("Final_Manuscript_Figures/Kamwezi_P441L_No_Legend.png", p, width = 10, height = 8, units = "in")
+###=================================================================================
+
+# R561H
+
+# 6) Clean up k13_R561H labels (NAs -> "Missing data") & set fixed order
+vt <- vertex_attr(g_clusters)
+k13 <- vt$k13_R561H
+k13[is.na(k13)] <- "Missing data"
+k13 <- factor(
+  k13,
+  levels = c("WT", "Mix or Mutant", "Missing data"),
+  ordered = TRUE
+)
+g_clusters <- set_vertex_attr(g_clusters, "k13_R561H", value = k13)
+
+# 7) Plot with MANUAL layout (positions are fixed), edges & alpha from 'prob'
+#    Color by k13_R561H; shape by founder; hide size legend.
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(aes(edge_alpha = prob),
+                 arrow = arrow(type = "closed", length = unit(2, 'mm')),
+                 end_cap = circle(2, 'mm'),
+                 show.legend = FALSE) +
+  geom_node_point(aes(color = k13_R561H, shape = founder, size = founder)) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    name = "k13_R561H"
+  ) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), name = "Founder") +
+  scale_size_manual(values = c(`FALSE` = 6, `TRUE` = 6)) +
+  guides(size = "none") +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  )+
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+print(p)
+
+#ggsave("Final_Manuscript_Figures/Kamwezi_R561H.png", p, width = 10, height = 8, units = "in")
+
+##----------------- COI -------------------------------------------------------------
+
+# Extract raw COI values
+vt  <- vertex_attr(g_clusters)
+coi_raw <- vt$coi
+
+# Build two COI categories
+coi_cat <- dplyr::case_when(
+  is.na(coi_raw) ~ "Missing",
+  coi_raw == 1   ~ "Monoclonal",
+  coi_raw > 1    ~ "Polyclonal"
+)
+
+coi_cat <- factor(coi_cat, levels = c("Monoclonal", "Polyclonal", "Missing"))
+
+# Add to graph
+g_clusters <- set_vertex_attr(g_clusters, "COI_cat", value = coi_cat)
+
+## Plot
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(
+    aes(edge_alpha = prob),
+    arrow = arrow(type = "closed", length = unit(2, 'mm')),
+    end_cap = circle(2, 'mm'),
+    show.legend = FALSE
+  ) +
+  
+  # Node aesthetics
+  geom_node_point(
+    aes(color = k13_P441L, shape = COI_cat),
+    size = 6
+  ) +
+  
+  # Color scale: K13 genotype
+  scale_color_manual(
+    values = c(
+      "WT"            = "#1b9e77",
+      "Mix or Mutant" = "#d95f02",
+      "Missing data"  = "#969696"
+    ),
+    name = "Genotype"
+  ) +
+  
+  # Shape scale: COI categories
+  scale_shape_manual(
+    values = c(
+      "Monoclonal" = 18,  # diamond
+      "Polyclonal" = 16,  # solid circle
+      "Missing"    = 1    # hollow circle
+    ),
+    name   = "COI"
+  ) +
+  
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size  = unit(1.5, "cm"),
+    legend.text      = element_text(size = 12),
+    legend.title     = element_text(size = 14, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    shape = guide_legend(override.aes = list(size = 5))
+  )
+
+print(p)
+#ggsave("Final_Manuscript_Figures/Figure 3/Kamwezi_P441L_COI.png", p, width = 10, height = 8, units = "in")
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(p)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+#ggsave("Final_Manuscript_Figures/Figure 3/Kamwezi_P441L_legend.png",
+ #      plot = arrangeGrob(legend_plot),
+  #     width = 3, height = 4, dpi = 300, bg = "white")
+
+##---------------------------------------------------------------------------------
+#### some changes on the plot
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(
+    aes(edge_alpha = prob),
+    arrow = arrow(type = "closed", length = unit(2, 'mm')),
+    end_cap = circle(2, 'mm'),
+    show.legend = FALSE
+  ) +
+  
+  # Larger nodes
+  geom_node_point(
+    aes(color = k13_P441L, shape = COI_cat),
+    size = 8
+  ) +
+  
+  # Color scale
+  scale_color_manual(
+    values = c(
+      "WT"            = "#1b9e77",
+      "Mix or Mutant" = "#d95f02",
+      "Missing data"  = "#969696"
+    ),
+    name = "Genotype"
+  ) +
+  
+  # Shape scale
+  scale_shape_manual(
+    values = c(
+      "Monoclonal" = 18,  # diamond
+      "Polyclonal" = 16,  # solid circle
+      "Missing"    = 1    # hollow circle
+    ),
+    name = "COI"
+  ) +
+  
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+
+    # Tighter legend, less whitespace
+    legend.key.height = unit(1.5, "cm"),
+    legend.key.width  = unit(1, "cm"),
+    legend.spacing.y  = unit(0.4, "cm"),
+    legend.spacing.x  = unit(0.4, "cm"),
+    
+    # Larger legend text
+    legend.text  = element_text(size = 14),
+    legend.title = element_text(size = 16, face = "bold")
+  ) +
+  
+  # Increase size of legend symbols
+  guides(
+    color = guide_legend(override.aes = list(size = 7)),
+    shape = guide_legend(override.aes = list(size = 7))
+  )
+
+print(p)
+
+#ggsave("Final_Manuscript_Figures/Figure 3/Kamwezi_P441L_COI_bigger.png", p, width = 10, height = 8, units = "in")
+
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(p)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+#ggsave("Final_Manuscript_Figures/Figure 3/Kamwezi_P441L_legend_bigger.png",
+ #      plot = arrangeGrob(legend_plot),
+  #     width = 2.5, height = 3, dpi = 300, bg = "white")
+##--------------------------------------------------------------------------------------------
+## Remove the legend from the figure
+### No Legend plot
+
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(
+    aes(edge_alpha = prob),
+    arrow = arrow(type = "closed", length = unit(2, 'mm')),
+    end_cap = circle(2, 'mm'),
+    show.legend = FALSE
+  ) +
+  
+  # Larger nodes
+  geom_node_point(
+    aes(color = k13_P441L, shape = COI_cat),
+    size = 8
+  ) +
+  
+  # Color scale
+  scale_color_manual(
+    values = c(
+      "WT"            = "#1b9e77",
+      "Mix or Mutant" = "#d95f02",
+      "Missing data"  = "#969696"
+    ),
+    name = "Genotype"
+  ) +
+  
+  # Shape scale
+  scale_shape_manual(
+    values = c(
+      "Monoclonal" = 18,  # diamond
+      "Polyclonal" = 16,  # solid circle
+      "Missing"    = 1    # hollow circle
+    ),
+    name = "COI"
+  ) +
+  
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position = "none",
+    panel.background = element_rect(fill = "white", color = NA),
+
+    # Tighter legend, less whitespace
+    legend.key.height = unit(1.5, "cm"),
+    legend.key.width  = unit(1, "cm"),
+    legend.spacing.y  = unit(0.4, "cm"),
+    legend.spacing.x  = unit(0.4, "cm"),
+    
+    # Larger legend text
+    legend.text  = element_text(size = 14),
+    legend.title = element_text(size = 16, face = "bold")
+  ) +
+  
+  # Increase size of legend symbols
+  guides(
+    color = guide_legend(override.aes = list(size = 7)),
+    shape = guide_legend(override.aes = list(size = 7))
+  )
+
+print(p)
+
+#ggsave("Final_Manuscript_Figures/Figure 3/Kamwezi_P441L_COI_No_Legend.png", p, width = 10, height = 8, units = "in")
+###================================================================================================
+
+## K13 R561H
+#### some changes on the plot
+p <- ggraph(g_clusters, layout = "manual", x = manual_x, y = manual_y) +
+  geom_edge_link(
+    aes(edge_alpha = prob),
+    arrow = arrow(type = "closed", length = unit(2, 'mm')),
+    end_cap = circle(2, 'mm'),
+    show.legend = FALSE
+  ) +
+  
+  # Larger nodes
+  geom_node_point(
+    aes(color = k13_R561H, shape = COI_cat),
+    size = 8
+  ) +
+  
+  # Color scale
+  scale_color_manual(
+    values = c(
+      "WT"            = "#1b9e77",
+      "Mix or Mutant" = "#d95f02",
+      "Missing data"  = "#969696"
+    ),
+    name = "Genotype"
+  ) +
+  
+  # Shape scale
+  scale_shape_manual(
+    values = c(
+      "Monoclonal" = 18,  # diamond
+      "Polyclonal" = 16,  # solid circle
+      "Missing"    = 1    # hollow circle
+    ),
+    name = "COI"
+  ) +
+  
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position = "none",
+    panel.background = element_rect(fill = "white", color = NA),
+
+    # Tighter legend, less whitespace
+    legend.key.height = unit(1.5, "cm"),
+    legend.key.width  = unit(1, "cm"),
+    legend.spacing.y  = unit(0.4, "cm"),
+    legend.spacing.x  = unit(0.4, "cm"),
+    
+    # Larger legend text
+    legend.text  = element_text(size = 14),
+    legend.title = element_text(size = 16, face = "bold")
+  ) +
+  
+  # Increase size of legend symbols
+  guides(
+    color = guide_legend(override.aes = list(size = 7)),
+    shape = guide_legend(override.aes = list(size = 7))
+  )
+
+print(p)
+
+#ggsave("Final_Manuscript_Figures/Figure 3/Kamwezi_R561H_COI_No_Legend.png", p, width = 10, height = 8, units = "in")
+```
+
+
+
+## DCIFER Network Plot with fixed clusters
+```{r, }
+set.seed(100)
+# Extract node positions from shared layout
+
+#Extract node name and x/y
+transmission_layout <- shared_layout %>% 
+  dplyr::select(name, x, y)
+
+##
+tg_with_coords <- tg %>%
+  activate(nodes) %>%
+  left_join(transmission_layout, by = "name")
+
+## Plot
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Transparent, thin, gray edges
+  geom_edge_link(
+    alpha = 0.2,
+    color = "gray70",
+    edge_width = 0.4
+  ) +
+  # Optional: Use curved edges to reduce clutter
+  # geom_edge_fan(alpha = 0.2, color = "gray70", edge_width = 0.3)
+
+  # Plot nodes by cluster
+  geom_node_point(
+    aes(color = cluster),
+    size = 3
+  ) +
+  scale_color_manual(values = cluster_colors) +  # Make sure this exists
+  labs(title = "Kamwezi Clusters (dcifer)", color = "Cluster ID") +
+  coord_fixed() +
+  # Clean white background
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+###-------------------------------------------------------
+## Excluding long edges from the plot
+# Extract layout (should be character node names)
+transmission_layout <- shared_layout %>% dplyr::select(name, x, y)
+
+#
+tg_with_coords <- tg %>%
+  activate(nodes) %>%
+  left_join(transmission_layout, by = "name")
+
+## Add travel info
+nodes_tbl <- tg_with_coords %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  left_join(travel2, by = c("name" = "id"))  
+
+##
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  left_join(travel2, by = c("name" = "id"))
+
+ # Extract edge table and node table
+edges_tbl <- tg_with_coords %>%
+  activate(edges) %>%
+  as_tibble()
+
+#
+nodes_tbl <- tg_with_coords %>%
+  activate(nodes) %>%
+  as_tibble() %>%
+  mutate(row_id = row_number())
+#
+node_id_lookup <- tibble(
+  index = 1:nrow(nodes_tbl),
+  name = nodes_tbl$name
+)
+
+##
+edge_df <- edges_tbl %>%
+  mutate(
+    from = node_id_lookup$name[from],
+    to   = node_id_lookup$name[to]
+  )
+
+# Join coordinates to calculate edge lengths
+edge_coords <- edge_df %>%
+  left_join(transmission_layout %>% dplyr::rename(from = name, x_from = x, y_from = y), by = "from") %>%
+  left_join(transmission_layout %>% dplyr::rename(to = name, x_to = x, y_to = y), by = "to") %>%
+  mutate(
+    edge_length = sqrt((x_to - x_from)^2 + (y_to - y_from)^2)
+  )
+
+# Filter long edges
+threshold <- 5
+short_edges <- edge_coords %>% filter(edge_length <= threshold)
+
+## Plot
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.4,
+    color = "gray70",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = cluster),
+    size = 3
+  ) +
+  scale_color_manual(values = cluster_colors) +
+  labs(title = "Kamwezi Clusters (dcifer)", color = "Cluster ID") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA)
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_dcifer_Clusters_fixed.png", dcifer_plot, width = 10, height = 8, units = "in")
+
+####------------------------------------------------------------------
+# Color by travel history
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside the country" = "#B22222",
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    na.value = "gray80"
+  ) +
+  labs(title = "Kamwezi Travel History", color = "Travel History") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_dcifer_Clusters_fixed_travel.png", dcifer_plot, width = 10, height = 8, units = "in")
+##------------------------------------------------------------------------------
+
+### Remove the title and the legend from the Dcifer plot
+# Function to extract legend
+get_legend_plot <- function(plot) {
+  g <- ggplotGrob(plot)
+  legend_index <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+  g$grobs[[legend_index]]
+}
+
+# --- Create plot WITH legend ---
+dcifer_plot_with_legend <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6   # 🔥 Increased node size
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district" = "#359B73",
+      "No travel" = "#F748A5",
+      "Missing data" = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel History"
+  ) +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size = unit(1.5, "cm"),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13, face = "bold")
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5))  # bigger dots in legend
+  )
+
+# --- Extract legend ---
+legend_plot <- get_legend_plot(dcifer_plot_with_legend)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Ka_Dcifer_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 3, dpi = 300, bg = "white")
+
+# Main plot WITHOUT legend
+Kamwezi_plot_clean <- dcifer_plot_with_legend +
+  theme(legend.position = "none")
+
+Kamwezi_plot_clean
+
+# Save clean plot
+ggsave("Final_Manuscript_Figures/Kamwezi_dcifer_No_Legend.png",
+       plot = Kamwezi_plot_clean,
+       width = 9, height = 9, units = "in", bg = "white")
+
+```
+
+### Build a DCIFER network plot with thickened edges based on r
+```{r,}
+set.seed(100)
+
+short_edges$Pairwise_IBD <- as.numeric(short_edges$ibd)
+
+## With no Legend
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+  scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 8
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+  
+  scale_x_continuous(expand = expansion(mult = 0.04)) +
+  scale_y_continuous(expand = expansion(mult = 0.04)) +
+  
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.margin = margin(-5, -5, -5, -5),
+    legend.position = "none" 
+  )
+
+dcifer_plot
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Kamwez1_Dcifer_Ibd_No_legend1.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+##
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Kamwez1_Dcifer_Ibd_No_legend2.png",
+       plot = dcifer_plot,
+       width = 8, height = 8, units = "in", bg = "white")
+##==================================================================================
+
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  # Edges: thickness & alpha reflect IBD
+  geom_segment(
+    data = short_edges,   # or short_edges_sig if you filtered
+    aes(
+      x    = x_from,
+      y    = y_from,
+      xend = x_to,
+      yend = y_to,
+      linewidth = Pairwise_IBD,
+      alpha     = Pairwise_IBD
+    ),
+    color = "gray30",
+    show.legend = TRUE,
+    inherit.aes = FALSE
+  ) +
+  scale_linewidth(range = c(0.5, 2)) +
+  
+  # Nodes: travel-history colors
+  geom_node_point(
+    aes(color = furthesttravel),
+    size = 6
+  ) +
+  scale_color_manual(
+    values = c(
+      "Outside district inside country" = "#2271B2",
+      "Inside district"                = "#359B73",
+      "No travel"                      = "#F748A5",
+      "Missing data"                   = "#969696"
+    ),
+    na.value = "gray80",
+    name = "Travel history"
+  ) +
+
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.key.size  = unit(1.3, "cm"),
+    legend.text      = element_text(size = 11),
+    legend.title     = element_text(size = 13, face = "bold")
+  )
+
+dcifer_plot
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Kamwezi_Dcifer_Ibd_legend.png",
+       plot = dcifer_plot,
+       width = 12, height = 9, units = "in", bg = "white")
+
+#### Save the legend separate
+# Extract legend
+legend_plot <- get_legend_plot(dcifer_plot)
+
+# View legend
+grid.newpage()
+grid.draw(legend_plot)
+
+# Save legend separately
+
+ggsave("Final_Manuscript_Figures/Re-analysis_Figs_2026/Kamwezi_dcifer_legend.png",
+       plot = arrangeGrob(legend_plot),
+       width = 3.5, height = 6, dpi = 300, bg = "white")
+```
+
+
+#### Color by Resistance Markers
+```{r,}
+### P44IL
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  left_join(k13_P441L, by = c("name" = "id"))
+
+tg_with_coords %>% 
+  activate(nodes) %>%
+  as_tibble() %>% 
+  select(name, k13_P441L) %>% 
+  head()
+
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = k13_P441L),
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    na.value = "gray80",
+    name = "k13_P441L"
+  ) +
+  labs(title = "Kamwezi k13_P441L Mutation", color = "Genotype") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_dcifer_Clusters_fixed_P441L.png", dcifer_plot, width = 10, height = 8, units = "in")
+#--------------------------------------------------------------------------
+## R561H
+tg_with_coords <- tg_with_coords %>%
+  activate(nodes) %>%
+  left_join(k13_R561H, by = c("name" = "id"))
+
+tg_with_coords %>% 
+  activate(nodes) %>%
+  as_tibble() %>% 
+  select(name, k13_R561H) %>% 
+  head()
+
+dcifer_plot <- ggraph(tg_with_coords, layout = "manual", x = x, y = y) +
+  geom_segment(
+    data = short_edges,
+    aes(x = x_from, y = y_from, xend = x_to, yend = y_to),
+    alpha = 0.5,
+    color = "gray50",
+    linewidth = 0.6,
+    inherit.aes = FALSE
+  ) +
+  geom_node_point(
+    aes(color = k13_R561H),
+    size = 3
+  ) +
+  scale_color_manual(
+    values = c(
+      "WT" = "#1b9e77",
+      "Mix or Mutant" = "#d95f02"
+    ),
+    na.value = "gray80",
+    name = "k13_R561H"
+  ) +
+  labs(title = "Kamwezi k13_R561H Mutation", color = "Genotype") +
+  coord_fixed() +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+dcifer_plot
+
+ggsave("DCIFER_RESULTS/Kamwezi_dcifer_Clusters_fixed_R561H.png", dcifer_plot, width = 10, height = 8, units = "in")
+##------------------------------------------------------------------------------
+```
+
+
+

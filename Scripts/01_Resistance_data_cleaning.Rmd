@@ -1,0 +1,215 @@
+---
+title: "PRELIMINARY ANALYSIS"
+date: "2025-04-09"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+#rm(list=ls(all=TRUE))
+# load the required packages
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+library(tidyr) 
+library(tibble)
+library(readxl)
+library(kableExtra)
+library(ggbeeswarm)
+library(RColorBrewer)
+library(readstata13)
+## Set a working directory
+setwd("/home/monica/Desktop/IMMRSE_Study/IMMRSE-Concept/Manuscript_Analysis_03_2025")
+```
+
+
+### QC for the resistance data
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+## Reading in these csv files for each site
+ 
+### Round 1
+Muko_R1<- read.csv("Resistance_Data/Muko_resmarker_table_R1.csv")
+Maziba_R1<- read.csv("Resistance_Data/Maziba_resmarker_table_R1.csv")
+Kamwezi_R1 <-read.csv("Resistance_Data/Kamwezi_resmarker_table_R1.csv")
+
+## Samples
+length(unique(Muko_R1$SampleID)) # 86 samples
+length(unique(Maziba_R1$SampleID)) # 25 samples
+length(unique(Kamwezi_R1$SampleID)) # 98 samples
+
+### Round 2
+Muko_R2<- read.csv("Resistance_Data/Muko_resmarker_table_R2.csv")
+Maziba_R2<- read.csv("Resistance_Data/Maziba_resmarker_table_R2.csv")
+Kamwezi_R2 <-read.csv("Resistance_Data/Kamwezi_resmarker_table_R2.csv")
+
+## Samples
+length(unique(Muko_R2$SampleID)) # 34 samples
+length(unique(Maziba_R2$SampleID)) # 27  samples
+length(unique(Kamwezi_R2$SampleID)) # 100 samples
+
+### Round 3
+Muko_R3<- read.csv("Resistance_Data/Muko_resmarker_table_R3.csv")
+Maziba_R3<- read.csv("Resistance_Data/Maziba_resmarker_table_R3.csv")
+
+## Samples
+length(unique(Muko_R3$SampleID)) # 52 samples
+length(unique(Maziba_R3$SampleID)) # 43  samples
+
+########### Bind together
+Muko_res <- bind_rows(Muko_R1, Muko_R2, Muko_R3) %>% dplyr::rename(sample_id=SampleID)
+Maziba_res <- bind_rows(Maziba_R1, Maziba_R2, Maziba_R3) %>% dplyr::rename(sample_id=SampleID)
+Kamwezi_res <- bind_rows(Kamwezi_R1, Kamwezi_R2) %>% dplyr::rename(sample_id=SampleID)
+
+length(unique(Muko_res$sample_id)) # 172 samples
+length(unique(Maziba_res$sample_id)) # 95 samples
+length(unique(Kamwezi_res$sample_id)) # 198 samples
+
+## Kamwezi data includes both IMMRSE-U and ZUMBA. Let's only retain ZUMBA-Kamwezi data
+Kamwezi_IDs <-read.csv("Filtered_data/Kamwezi_filtered_data.csv") %>% select(sample_id) %>% unique()
+
+length(unique(Kamwezi_IDs$sample_id)) # 100 samples
+
+Kamwezi_res <- Kamwezi_res %>% semi_join(Kamwezi_IDs, by = "sample_id")
+
+##
+length(unique(Muko_res$sample_id)) # 172 samples
+length(unique(Maziba_res$sample_id)) # 95 samples
+length(unique(Kamwezi_res$sample_id)) # 100 samples
+#--------------------------------------------------------------------------------
+
+## QC 
+### Filter out loci that with 10 reads and below
+
+## Muko
+Muko_res <- Muko_res %>% 
+  filter(Reads > 10)
+
+# Group by SampleID and count the number of loci with reads >= 100 for each sample
+sample_counts <- Muko_res%>%
+  group_by(sample_id) %>%
+  summarise(perc_loci_above_100 = sum(Reads >= 100) / n()) %>%
+  ungroup()
+
+# Retaining samples: 50% loci having reads >= 100
+filtered_samples_50 <- sample_counts %>%
+  filter(perc_loci_above_100 >= 0.50)
+
+length(unique(filtered_samples_50$sample_id)) ## 166 samples
+
+# Extract sample IDs that do not meet the criteria
+rejected_sample_ids <- sample_counts %>%
+  filter(perc_loci_above_100 < 0.5) %>%  
+  select(sample_id)
+
+### Filter to remove those that did not pass the criteria of 50% loci having 100 reads
+filtered_data<- Muko_res %>%
+  filter(!sample_id %in% rejected_sample_ids$sample_id)
+
+Muko_res_filtered <- filtered_data %>% 
+  group_by(sample_id, Barcode, Locus, GeneID, CodonID) %>% 
+   mutate(sum_reads = sum(Reads)) %>% 
+  mutate(norm.reads.allele = Reads/sum_reads) %>% 
+  filter(norm.reads.allele > 0.01) %>%
+    mutate(sum_reads = sum(Reads)) %>% 
+   mutate(norm.reads.allele = Reads/sum_reads)
+
+length(unique(filtered_data$sample_id))
+#--------------------------------------------------------------------------------
+
+## Maziba
+Maziba_res <- Maziba_res %>% 
+  filter(Reads > 10)
+
+# Group by SampleID and count the number of loci with reads >= 100 for each sample
+sample_counts <- Maziba_res%>%
+  group_by(sample_id) %>%
+  summarise(perc_loci_above_100 = sum(Reads >= 100) / n()) %>%
+  ungroup()
+
+# Retaining samples: 50% loci having reads >= 100
+filtered_samples_50 <- sample_counts %>%
+  filter(perc_loci_above_100 >= 0.50)
+
+length(unique(filtered_samples_50$sample_id)) ## 95 samples
+
+# Extract sample IDs that do not meet the criteria
+rejected_sample_ids <- sample_counts %>%
+  filter(perc_loci_above_100 < 0.5) %>%  
+  select(sample_id)
+
+### Filter to remove those that did not pass the criteria of 50% loci having 100 reads
+filtered_data<- Maziba_res %>%
+  filter(!sample_id %in% rejected_sample_ids$sample_id)
+
+Maziba_res_filtered <- filtered_data %>% 
+  group_by(sample_id, Barcode, Locus, GeneID, CodonID) %>% 
+   mutate(sum_reads = sum(Reads)) %>% 
+  mutate(norm.reads.allele = Reads/sum_reads) %>% 
+  filter(norm.reads.allele > 0.01) %>%
+    mutate(sum_reads = sum(Reads)) %>% 
+   mutate(norm.reads.allele = Reads/sum_reads)  
+#--------------------------------------------------------------------------------
+
+## Kamwezi
+Kamwezi_res <- Kamwezi_res %>% 
+  filter(Reads > 10)
+
+# Group by SampleID and count the number of loci with reads >= 100 for each sample
+sample_counts <- Kamwezi_res%>%
+  group_by(sample_id) %>%
+  summarise(perc_loci_above_100 = sum(Reads >= 100) / n()) %>%
+  ungroup()
+# Retaining samples: 50% loci having reads >= 100
+filtered_samples_50 <- sample_counts %>%
+  filter(perc_loci_above_100 >= 0.50)
+
+length(unique(filtered_samples_50$sample_id)) ## 100 samples
+
+# Extract sample IDs that do not meet the criteria
+rejected_sample_ids <- sample_counts %>%
+  filter(perc_loci_above_100 < 0.5) %>%  
+  select(sample_id)
+
+### Filter to remove those that did not pass the criteria of 50% loci having 100 reads
+filtered_data<- Kamwezi_res %>%
+  filter(!sample_id %in% rejected_sample_ids$sample_id)
+#
+Kamwezi_res_filtered <- filtered_data %>% 
+  group_by(sample_id, Barcode, Locus, GeneID, CodonID) %>% 
+   mutate(sum_reads = sum(Reads)) %>% 
+  mutate(norm.reads.allele = Reads/sum_reads) %>% 
+  filter(norm.reads.allele > 0.01) %>%
+    mutate(sum_reads = sum(Reads)) %>% 
+   mutate(norm.reads.allele = Reads/sum_reads) 
+#--------------------------------------------------------------------------------
+# Retained samples
+length(unique(Muko_res_filtered$sample_id)) # 166 samples
+length(unique(Maziba_res_filtered$sample_id)) # 95 samples
+length(unique(Kamwezi_res_filtered$sample_id)) # 100 samples
+
+### Let's remove "Duplicated samples"
+Duplic_samples<- read.csv("Data/duplicated_samples_to_remove_from_analysis.csv") %>% dplyr::rename(sample_id=SampleID)
+
+# Muko
+filtered_res_data_mu <- Muko_res_filtered %>%
+  anti_join(Duplic_samples, by = "sample_id")
+length(unique(filtered_res_data_mu$sample_id)) # 161
+
+# Maziba
+filtered_res_data_ma <- Maziba_res_filtered %>%
+  anti_join(Duplic_samples, by = "sample_id")
+length(unique(filtered_res_data_ma$sample_id)) # 90
+
+## Kamwezi has no duplication
+
+## SAVE
+write.csv(filtered_res_data_mu, "Resistance_Data/Muko_res_filtered.csv", row.names = FALSE)
+write.csv(filtered_res_data_ma, "Resistance_Data/Maziba_res_filtered.csv", row.names = FALSE)
+write.csv(Kamwezi_res_filtered, "Resistance_Data/Kamwezi_res_filtered.csv", row.names = FALSE)
+```
+
+
+
+
